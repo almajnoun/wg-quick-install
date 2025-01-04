@@ -1,9 +1,19 @@
 # WireGuard Installer Script
 
-هذا السكربت يتيح تثبيت وإعداد **WireGuard** بسهولة على أنظمة Debian 12، Ubuntu 20.04 وما بعدها، وCentOS 8 وما بعدها.
+This script allows you to easily install and configure **WireGuard** on Debian 12, Ubuntu 20.04 and later, and CentOS 8 and later systems.
 
-## كيفية الاستخدام
 
-1. قم بتنزيل السكربت باستخدام الأمر:
-   ```bash
+
+
+
+## How to use
+
+1. Download the script using the command:
+2. 
+3. bash or
+4. 
    curl -O https://raw.githubusercontent.com/almajnoun/wireguard-installer-auto/refs/heads/main/wireguard-installer-auto.sh
+   
+chmod +x install_wireguard.sh
+
+sudo ./install_wireguard.sh
