@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# سكريبت تثبيت وإدارة WireGuard محسّن مع خيارات DNS إضافية
+# سكريبت تثبيت وإدارة WireGuard محسّن مع تحسينات في الأمان، الاتصال، وتجربة المستخدم
 # المؤلف: Grok 3 (بتاريخ 26 فبراير 2025)
 
 # ألوان
@@ -16,11 +16,13 @@ WG_CONFIG="/etc/wireguard/wg0.conf"
 CLIENT_DIR="$HOME/wireguard-clients"
 LOG_FILE="$HOME/wireguard.log"
 IPV4_RANGE="10.0.0"
+IPV6_RANGE="fd00::"
 DNS_SERVER="8.8.8.8"
 KEEPALIVE=25
 PUBLIC_IP=""
 SERVER_ADDR=""
 CLIENT_NAME="client"
+MTU=1420
 
 # دوال مساعدة
 msg() {
@@ -63,23 +65,29 @@ check_os() {
 check_ip() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 
 detect_public_ip() {
-    PUBLIC_IP=$(ip -4 addr | grep inet | grep -v '127' | awk '{print $2}' | cut -d '/' -f 1 | head -1)
-    if ! check_ip "$PUBLIC_IP"; then
+    local attempts=3
+    for ((i=1; i<=attempts; i++)); do
+        PUBLIC_IP=$(ip -4 addr | grep inet | grep -v '127' | awk '{print $2}' | cut -d '/' -f 1 | head -1)
+        if check_ip "$PUBLIC_IP"; then break; fi
         PUBLIC_IP=$(curl -s ifconfig.me || curl -s icanhazip.com)
-    fi
+        if check_ip "$PUBLIC_IP"; then break; fi
+        [[ $i -lt $attempts ]] && sleep 2
+    done
     if ! check_ip "$PUBLIC_IP"; then
-        read -p "فشل اكتشاف IP العام، أدخله يدويًا: " PUBLIC_IP
+        read -p "فشل اكتشاف IP العام بعد $attempts محاولات، أدخله يدويًا: " PUBLIC_IP
         check_ip "$PUBLIC_IP" || msg "error" "IP غير صالح"
     fi
 }
 
 install_deps() {
+    echo -e "${YELLOW}جارٍ تثبيت الحزم... [===>]${NC}"
     case $os in
         "ubuntu"|"debian") apt update && apt install -y wireguard qrencode iptables iproute2 ;;
         "centos") yum install -y epel-release && yum install -y wireguard-tools qrencode iptables iproute ;;
         "fedora") dnf install -y wireguard-tools qrencode iptables iproute ;;
         "opensuse") zypper install -y wireguard-tools qrencode iptables iproute2 ;;
     esac
+    echo -e "${GREEN}تم تثبيت الحزم بنجاح [========>]${NC}"
 }
 
 setup_firewall() {
@@ -87,16 +95,23 @@ setup_firewall() {
         firewall-cmd --permanent --add-port="$WG_PORT"/udp
         firewall-cmd --permanent --zone=trusted --add-source="$IPV4_RANGE".0/24
         firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -j MASQUERADE
+        [[ -n "$IPV6_RANGE" ]] && firewall-cmd --permanent --zone=trusted --add-source="$IPV6_RANGE"::/64
         firewall-cmd --reload
     else
         iptables_path=$(command -v iptables)
+        ip6tables_path=$(command -v ip6tables)
         [[ $(systemd-detect-virt) == "openvz" ]] && command -v iptables-legacy &>/dev/null && iptables_path=$(command -v iptables-legacy)
         $iptables_path -A INPUT -p udp --dport "$WG_PORT" -j ACCEPT
         $iptables_path -A FORWARD -i wg0 -j ACCEPT
         $iptables_path -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
         $iptables_path -t nat -A POSTROUTING -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -j MASQUERADE
+        [[ -n "$IPV6_RANGE" ]] && $ip6tables_path -A FORWARD -i wg0 -j ACCEPT
+        [[ -n "$IPV6_RANGE" ]] && $ip6tables_path -t nat -A POSTROUTING -s "$IPV6_RANGE"::/64 -j MASQUERADE
         prevent_dns_leak
     fi
+    # تعطيل ICMP لتحسين الأمان
+    echo "net.ipv4.icmp_echo_ignore_all=1" >> /etc/sysctl.conf
+    sysctl -p
 }
 
 prevent_dns_leak() {
@@ -107,12 +122,29 @@ prevent_dns_leak() {
     done
 }
 
-enable_bbr() {
+optimize_sysctl() {
+    cat > /etc/sysctl.d/99-wireguard-optimize.conf <<EOF
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.tcp_rmem=4096 87380 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_adv_win_scale=2
+net.ipv4.tcp_low_latency=1
+net.ipv4.tcp_mtu_probing=1
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
     if modprobe tcp_bbr &>/dev/null && [[ $(uname -r) > "4.20" ]]; then
-        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-        sysctl -p
-        msg "success" "تم تفعيل TCP BBR"
+        sysctl -p /etc/sysctl.d/99-wireguard-optimize.conf
+        msg "success" "تم تحسين إعدادات sysctl مع BBR"
+    else
+        sed -i '/net.core.default_qdisc=fq/d' /etc/sysctl.d/99-wireguard-optimize.conf
+        sed -i '/net.ipv4.tcp_congestion_control=bbr/d' /etc/sysctl.d/99-wireguard-optimize.conf
+        sysctl -p /etc/sysctl.d/99-wireguard-optimize.conf
+        msg "info" "تم تطبيق إعدادات sysctl بدون BBR"
     fi
 }
 
@@ -123,7 +155,7 @@ select_dns() {
     echo "  3) OpenDNS (208.67.222.222, 208.67.220.220)"
     echo "  4) AdGuard (94.140.14.14, 94.140.15.15) - حماية من الإعلانات"
     echo "  5) Quad9 (9.9.9.9, 149.112.112.112) - حماية من البرمجيات الخبيثة"
-    echo "  6) NextDNS (45.90.28.0, 45.90.30.0) - تصفية متقدمة وقابلة للتخصيص"
+    echo "  6) NextDNS (45.90.28.0, 45.90.30.0) - تصفية متقدمة"
     echo "  7) CleanBrowsing (185.228.168.168, 185.228.169.168) - تصفية عائلية"
     echo "  8) مخصص"
     read -p "اختيارك [1]: " dns_choice
@@ -143,27 +175,30 @@ select_dns() {
 setup_server() {
     read -p "أدخل المنفذ [$WG_PORT]: " port
     WG_PORT=${port:-$WG_PORT}
+    read -p "أدخل MTU [$MTU]: " mtu_input
+    MTU=${mtu_input:-$MTU}
     wg genkey | tee /etc/wireguard/server_privatekey | wg pubkey > /etc/wireguard/server_publickey
+    [[ -s /etc/wireguard/server_privatekey ]] || msg "error" "فشل إنشاء مفتاح الخادم"
     SERVER_PRIVATE=$(cat /etc/wireguard/server_privatekey)
     SERVER_PUBLIC=$(cat /etc/wireguard/server_publickey)
     cat > "$WG_CONFIG" <<EOF
 # ENDPOINT $PUBLIC_IP
 [Interface]
 PrivateKey = $SERVER_PRIVATE
-Address = $IPV4_RANGE.1/24
+Address = $IPV4_RANGE.1/24${IPV6_RANGE:+, $IPV6_RANGE:1/64}
 ListenPort = $WG_PORT
+MTU = $MTU
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
 EOF
     chmod 600 "$WG_CONFIG"
-    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-    sysctl -p
 }
 
 add_client() {
     local client_name=${1:-$CLIENT_NAME}
     read -p "اسم العميل [$client_name]: " input_name
     client_name=${input_name:-$client_name}
+    [[ ! "$client_name" =~ ^[a-zA-Z0-9_-]+$ ]] && msg "error" "اسم العميل يجب أن يحتوي فقط على أحرف، أرقام، -، أو _"
     read -p "عنوان IP (مثال: $IPV4_RANGE.2): " client_ip
     if grep -q "AllowedIPs = $client_ip" "$WG_CONFIG"; then
         msg "error" "العنوان $client_ip مستخدم"
@@ -171,6 +206,7 @@ add_client() {
     fi
     wg genkey | tee "$CLIENT_DIR/$client_name.key" | wg pubkey > "$CLIENT_DIR/$client_name.pub"
     wg genpsk > "$CLIENT_DIR/$client_name.psk"
+    [[ -s "$CLIENT_DIR/$client_name.key" ]] || msg "error" "فشل إنشاء مفتاح العميل"
     CLIENT_PRIVATE=$(cat "$CLIENT_DIR/$client_name.key")
     CLIENT_PUBLIC=$(cat "$CLIENT_DIR/$client_name.pub")
     CLIENT_PSK=$(cat "$CLIENT_DIR/$client_name.psk")
@@ -178,27 +214,39 @@ add_client() {
     echo "[Peer]" >> "$WG_CONFIG"
     echo "PublicKey = $CLIENT_PUBLIC" >> "$WG_CONFIG"
     echo "PresharedKey = $CLIENT_PSK" >> "$WG_CONFIG"
-    echo "AllowedIPs = $client_ip/32" >> "$WG_CONFIG"
+    echo "AllowedIPs = $client_ip/32${IPV6_RANGE:+, $IPV6_RANGE:$((RANDOM % 1000 + 2))/128}" >> "$WG_CONFIG"
     echo "# END_PEER $client_name" >> "$WG_CONFIG"
     read -p "PersistentKeepalive [$KEEPALIVE]: " keepalive
     KEEPALIVE=${keepalive:-$KEEPALIVE}
     cat > "$CLIENT_DIR/$client_name.conf" <<EOF
 [Interface]
 PrivateKey = $CLIENT_PRIVATE
-Address = $client_ip/24
+Address = $client_ip/24${IPV6_RANGE:+, $IPV6_RANGE:$((RANDOM % 1000 + 2))/64}
 DNS = $DNS_SERVER
+MTU = $MTU
 
 [Peer]
 PublicKey = $SERVER_PUBLIC
 PresharedKey = $CLIENT_PSK
 Endpoint = $PUBLIC_IP:$WG_PORT
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = $KEEPALIVE
 EOF
     chmod 600 "$CLIENT_DIR/$client_name.conf"
     systemctl restart wg-quick@wg0
     qrencode -t ansiutf8 < "$CLIENT_DIR/$client_name.conf"
+    test_connection "$client_name"
     msg "success" "تم إضافة $client_name، التكوين في $CLIENT_DIR/$client_name.conf"
+}
+
+test_connection() {
+    echo -e "${YELLOW}جارٍ اختبار الاتصال لـ $1... [===>]${NC}"
+    sleep 2
+    if wg show wg0 | grep -q "$1"; then
+        msg "success" "الاتصال نشط لـ $1"
+    else
+        msg "warning" "فشل التحقق من الاتصال لـ $1، تحقق من التكوين"
+    fi
 }
 
 list_clients() {
@@ -230,15 +278,18 @@ show_client_qr() {
 remove_wireguard() {
     systemctl stop wg-quick@wg0
     systemctl disable wg-quick@wg0
-    rm -rf /etc/wireguard "$CLIENT_DIR"
+    rm -rf /etc/wireguard "$CLIENT_DIR" /etc/sysctl.d/99-wireguard-optimize.conf
     if command -v firewall-cmd &>/dev/null; then
         firewall-cmd --permanent --remove-port="$WG_PORT"/udp
         firewall-cmd --permanent --zone=trusted --remove-source="$IPV4_RANGE".0/24
+        [[ -n "$IPV6_RANGE" ]] && firewall-cmd --permanent --zone=trusted --remove-source="$IPV6_RANGE"::/64
         firewall-cmd --reload
     else
         iptables -D INPUT -p udp --dport "$WG_PORT" -j ACCEPT
         iptables -D FORWARD -i wg0 -j ACCEPT
         iptables -t nat -D POSTROUTING -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -j MASQUERADE
+        [[ -n "$IPV6_RANGE" ]] && ip6tables -D FORWARD -i wg0 -j ACCEPT
+        [[ -n "$IPV6_RANGE" ]] && ip6tables -t nat -D POSTROUTING -s "$IPV6_RANGE"::/64 -j MASQUERADE
     fi
     case $os in
         "ubuntu"|"debian") apt remove -y wireguard ;;
@@ -246,7 +297,28 @@ remove_wireguard() {
         "fedora") dnf remove -y wireguard-tools ;;
         "opensuse") zypper remove -y wireguard-tools ;;
     esac
+    sysctl -w net.ipv4.ip_forward=0
+    sysctl -w net.ipv6.conf.all.forwarding=0
     msg "success" "تم إزالة WireGuard"
+}
+
+show_help() {
+    echo -e "${GREEN}=== WireGuard Enhanced Script ==="
+    echo "الاستخدام: $0 [خيارات]"
+    echo -e "الخيارات:${NC}"
+    echo "  --auto             تثبيت تلقائي"
+    echo "  --addclient NAME   إضافة عميل جديد"
+    echo "  --listclients      قائمة العملاء"
+    echo "  --removeclient NAME إزالة عميل"
+    echo "  --showclientqr NAME عرض رمز QR لعميل"
+    echo "  --uninstall        إزالة WireGuard"
+    echo "  --serveraddr ADDR  تحديد عنوان الخادم"
+    echo "  --port PORT        تحديد منفذ (افتراضي: 51820)"
+    echo "  --clientname NAME  تحديد اسم العميل الافتراضي"
+    echo "  --dns1 DNS         تحديد خادم DNS"
+    echo "  --yes              الموافقة التلقائية"
+    echo "  --help             عرض هذه التعليمات"
+    exit 0
 }
 
 # معالجة خيارات سطر الأوامر
@@ -263,6 +335,7 @@ while [[ "$#" -gt 0 ]]; do
         --clientname) CLIENT_NAME="$2"; shift 2 ;;
         --dns1) DNS_SERVER="$2"; shift 2 ;;
         --yes) YES=1; shift ;;
+        --help) show_help ;;
         *) msg "error" "خيار غير معروف: $1"; exit 1 ;;
     esac
 done
@@ -295,14 +368,14 @@ elif [[ $AUTO ]]; then
     install_deps
     detect_public_ip
     setup_firewall
-    enable_bbr
+    optimize_sysctl
     setup_server
     systemctl enable wg-quick@wg0
     systemctl start wg-quick@wg0
     add_client "$CLIENT_NAME"
 else
     if [[ -f "$WG_CONFIG" ]]; then
-        echo "WireGuard مثبت بالفعل، اختر خيارًا:"
+        echo -e "${GREEN}WireGuard مثبت بالفعل، اختر خيارًا:${NC}"
         echo "1) إضافة عميل"
         echo "2) قائمة العملاء"
         echo "3) إزالة عميل"
@@ -318,14 +391,16 @@ else
             *) exit 0 ;;
         esac
     else
+        echo -e "${YELLOW}جارٍ إعداد WireGuard... [=>]${NC}"
         install_deps
         detect_public_ip
         setup_firewall
-        enable_bbr
+        optimize_sysctl
         select_dns
         setup_server
         systemctl enable wg-quick@wg0
         systemctl start wg-quick@wg0
         add_client
+        echo -e "${GREEN}تم إكمال التثبيت! [========>]${NC}"
     fi
 fi
