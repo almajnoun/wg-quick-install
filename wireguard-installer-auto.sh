@@ -225,7 +225,6 @@ fetch_endpoint() {
     else
         [ -n "$ENDPOINT_NAME" ] && ENDPOINT_IP="$ENDPOINT_NAME" || detect_ip_address
     fi
-    # Ensure ENDPOINT_IP is set
     [ -z "$ENDPOINT_IP" ] && fail "Failed to determine endpoint IP address."
 }
 
@@ -274,7 +273,6 @@ set_port() {
             PORT_NUM="${port_input:-51820}"
         done
     fi
-    # Ensure PORT_NUM is always set
     PORT_NUM="${PORT_NUM:-$PORT_DEFAULT}"
     echo -e "${BLUE}Using Port: $PORT_NUM${NC}"
 }
@@ -398,6 +396,7 @@ configure_vpn() {
     SERVER_PUB=$(cat /etc/wireguard/server.pub)
     mv "$TEMP_KEY" /etc/wireguard/server.key
     chmod 600 /etc/wireguard/server.key /etc/wireguard/server.pub
+    [ -z "$ENDPOINT_IP" ] && fail "Endpoint IP is not set for server configuration."
     cat > "$VPN_CONFIG" << EOF
 # Endpoint: $ENDPOINT_IP
 [Interface]
@@ -499,11 +498,16 @@ Endpoint = $ENDPOINT_IP:$PORT_NUM
 PersistentKeepalive = $KEEPALIVE_DEFAULT
 EOF
     chmod 600 "$USER_DIR/$user_name.conf"
-    systemctl restart wg-quick@wg0
+    # Sync configuration without restarting service
+    wg syncconf wg0 <(grep -A 4 "^# BEGIN_PEER $user_name" "$VPN_CONFIG")
     if [ $? -ne 0 ]; then
-        echo -e "${RED}Failed to restart WireGuard service. Check logs:${NC}"
-        systemctl status wg-quick@wg0.service
-        fail "Service restart failed."
+        echo -e "${RED}Failed to sync WireGuard configuration. Falling back to restart:${NC}"
+        systemctl restart wg-quick@wg0
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Failed to restart WireGuard service. Check logs:${NC}"
+            systemctl status wg-quick@wg0.service
+            fail "Service restart failed."
+        fi
     fi
     echo -e "${GREEN}User '$user_name' added with IP: ${VPN_IPV4}.$ip_octet${NC}"
     [ "$ENABLE_IPV6" = 1 ] && echo -e "${GREEN}IPv6 IP: ${VPN_IPV6}$ip_octet${NC}"
@@ -546,13 +550,18 @@ remove_user() {
         read -rp "User number: " user_num
     done
     SAFE_NAME=$(grep '^# BEGIN_PEER' "$VPN_CONFIG" | cut -d ' ' -f 3 | sed -n "${user_num}p")
+    wg set wg0 peer "$(grep -A 1 "^# BEGIN_PEER $SAFE_NAME" "$VPN_CONFIG" | grep 'PublicKey' | cut -d ' ' -f 3)" remove
     sed -i "/^# BEGIN_PEER $SAFE_NAME$/,/^# END_PEER $SAFE_NAME$/d" "$VPN_CONFIG"
     rm -f "$USER_DIR/$SAFE_NAME.conf" "$USER_DIR/$SAFE_NAME.key" "$USER_DIR/$SAFE_NAME.pub" "$USER_DIR/$SAFE_NAME.psk"
-    systemctl restart wg-quick@wg0
+    wg syncconf wg0 "$VPN_CONFIG"
     if [ $? -ne 0 ]; then
-        echo -e "${RED}Failed to restart WireGuard service after removal. Check logs:${NC}"
-        systemctl status wg-quick@wg0.service
-        fail "Service restart failed."
+        echo -e "${RED}Failed to sync WireGuard configuration after removal. Falling back to restart:${NC}"
+        systemctl restart wg-quick@wg0
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Failed to restart WireGuard service. Check logs:${NC}"
+            systemctl status wg-quick@wg0.service
+            fail "Service restart failed."
+        fi
     fi
     echo -e "${GREEN}User '$SAFE_NAME' removed.${NC}"
 }
@@ -654,7 +663,6 @@ main() {
             set_ip_version
             set_initial_user
             choose_dns
-            prepare_install
             setup_packages
             configure_vpn
             setup_firewall
