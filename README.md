@@ -14,6 +14,6 @@ This script allows you to easily install and configure **WireGuard** on Debian 1
 4. 
    curl -O https://raw.githubusercontent.com/almajnoun/wireguard-installer-auto/refs/heads/main/wireguard-installer-auto.sh
    
-chmod +x install_wireguard.sh
+chmod +x wireguard-installer-auto.sh
 
-sudo ./install_wireguard.sh
+sudo ./wireguard-installer-auto.sh
