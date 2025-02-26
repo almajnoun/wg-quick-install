@@ -16,47 +16,55 @@ sudo ./wireguard-installer-auto.sh
 
 For automatic setup with custom options:
 
-sudo ./wireguard-installer-auto.sh --auto --clientname myclient --dns1 1.1.1.1 --dns2 1.0.0.1
+sudo ./wireguard-installer-auto.sh --quick --user myclient --dns-primary 1.1.1.1 --dns-secondary 1.0.0.1
 
-Usage
-Interactive Mode
-Run the script without arguments to enter interactive mode:
+How to Use
+Step-by-Step Mode
+Run the script without any arguments to enter an interactive setup:
 
 sudo ./wireguard-installer-auto.sh
 
-Choose between Default Mode (fully automated) or Custom Mode (customize settings).
-Follow the prompts to configure the server address, port, client name, and DNS.
-Command-Line Options
+Options Available:
+Quick Setup: Automatically installs WireGuard with default configurations.
+Custom Setup: Allows you to specify server details, ports, user names, and DNS servers.
+Follow the on-screen instructions to complete the process.
+Available Commands
 
-Usage: bash wireguard-installer-auto.sh [options]
+Usage: sudo ./wireguard-installer-auto.sh [commands]
 
-Options:
-  --addclient [client name]      Add a new client
-  --dns1 [DNS server IP]         Primary DNS server for new client (default: 8.8.8.8)
-  --dns2 [DNS server IP]         Secondary DNS server for new client (optional)
-  --listclients                  List the names of existing clients
-  --removeclient [client name]   Remove an existing client
-  --showclientqr [client name]   Show QR code for an existing client
-  --uninstall                    Remove WireGuard and delete all configuration
-  -y, --yes                      Assume "yes" for prompts when removing a client or WireGuard
-  -h, --help                     Show this help message and exit
+Commands:
+  --new-user [name]         Create a new VPN user
+  --dns-primary [IP]        Set primary DNS server (default: 8.8.8.8)
+  --dns-secondary [IP]      Set secondary DNS server (optional)
+  --show-users              Show all existing users
+  --delete-user [name]      Delete a specific user
+  --get-qr [name]           Display QR code for a user
+  --remove                  Remove WireGuard and all configurations
+  -y, --confirm             Skip confirmation prompts for removal
+  -h, --info                View this help guide
 
-Install Options (optional):
-  --auto                         Auto-install WireGuard with default or custom options
-  --serveraddr [DNS name or IP]  Server address (FQDN or IPv4)
-  --port [number]                Port for WireGuard (1-65535, default: 51820)
-  --clientname [client name]     Name for the first WireGuard client (default: client)
-  --dns1 [DNS server IP]         Primary DNS server for first client
-  --dns2 [DNS server IP]         Secondary DNS server for first client
+Setup Commands (optional):
+  --quick                   Perform an automated installation
+  --endpoint [DNS/IP]       Define VPN endpoint (domain or IPv4)
+  --port-num [number]       Set WireGuard port (1-65535, default: 51820)
+  --user [name]             Name the first VPN user (default: user)
+  --dns-primary [IP]        Primary DNS for the first user
+  --dns-secondary [IP]      Secondary DNS for the first user
 
-  Examples
-Install with Default Settings:
+Practical Examples
+Deploy with Default Configuration:
 
-sudo ./wireguard-installer-auto.sh --auto
-Add a New Client:
-sudo ./wireguard-installer-auto.sh --addclient newclient
-Remove a Client
-sudo ./wireguard-installer-auto.sh --removeclient newclient
-Uninstall WireGuard:
-sudo ./wireguard-installer-auto.sh --uninstall
+sudo ./wireguard-installer-auto.sh --quick
+
+Add a New VPN User:
+
+sudo ./wireguard-installer-auto.sh --new-user newuser
+
+Remove an Existing User:
+
+sudo ./wireguard-installer-auto.sh --delete-user newuser
+
+Uninstall WireGuard Completely:
+
+sudo ./wireguard-installer-auto.sh --remove
   
