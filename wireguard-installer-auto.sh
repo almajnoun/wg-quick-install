@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # سكريبت تثبيت وإدارة WireGuard محسّن مع وضع افتراضي واختياري
+# (بتاريخ 26 فبراير 2025)
 
 # ألوان
 RED='\033[0;31m'
@@ -78,6 +79,12 @@ detect_public_ip() {
     fi
 }
 
+detect_interface() {
+    # اكتشاف واجهة الشبكة الافتراضية
+    DEFAULT_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+    [[ -z "$DEFAULT_INTERFACE" ]] && DEFAULT_INTERFACE="eth0"  # الرجوع إلى eth0 إذا لم يتم العثور على واجهة
+}
+
 install_deps() {
     echo -e "${YELLOW}جارٍ تثبيت الحزم... [===>]${NC}"
     case $os in
@@ -86,12 +93,13 @@ install_deps() {
         "fedora") dnf install -y wireguard-tools qrencode iptables iproute ;;
         "opensuse") zypper install -y wireguard-tools qrencode iptables iproute2 ;;
     esac
-    mkdir -p /etc/wireguard
-    chmod 700 /etc/wireguard
+    mkdir -p /etc/wireguard "$CLIENT_DIR"
+    chmod 700 /etc/wireguard "$CLIENT_DIR"
     echo -e "${GREEN}تم تثبيت الحزم بنجاح [========>]${NC}"
 }
 
 setup_firewall() {
+    detect_interface
     if command -v firewall-cmd &>/dev/null; then
         firewall-cmd --permanent --add-port="$WG_PORT"/udp
         firewall-cmd --permanent --zone=trusted --add-source="$IPV4_RANGE".0/24
@@ -105,9 +113,9 @@ setup_firewall() {
         $iptables_path -A INPUT -p udp --dport "$WG_PORT" -j ACCEPT
         $iptables_path -A FORWARD -i wg0 -j ACCEPT
         $iptables_path -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-        $iptables_path -t nat -A POSTROUTING -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -j MASQUERADE
+        $iptables_path -t nat -A POSTROUTING -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -o "$DEFAULT_INTERFACE" -j MASQUERADE
         [[ -n "$IPV6_RANGE" ]] && $ip6tables_path -A FORWARD -i wg0 -j ACCEPT
-        [[ -n "$IPV6_RANGE" ]] && $ip6tables_path -t nat -A POSTROUTING -s "$IPV6_RANGE"::/64 -j MASQUERADE
+        [[ -n "$IPV6_RANGE" ]] && $ip6tables_path -t nat -A POSTROUTING -s "$IPV6_RANGE"::/64 -o "$DEFAULT_INTERFACE" -j MASQUERADE
         prevent_dns_leak
     fi
     echo "net.ipv4.icmp_echo_ignore_all=1" >> /etc/sysctl.conf
@@ -182,8 +190,7 @@ setup_server() {
         read -p "أدخل MTU [$MTU]: " mtu_input
         MTU=${mtu_input:-$MTU}
     fi
-    mkdir -p /etc/wireguard
-    chmod 700 /etc/wireguard
+    detect_interface
     wg genkey | tee /etc/wireguard/server_privatekey | wg pubkey > /etc/wireguard/server_publickey
     [[ -s /etc/wireguard/server_privatekey ]] || msg "error" "فشل إنشاء مفتاح الخادم"
     SERVER_PRIVATE=$(cat /etc/wireguard/server_privatekey)
@@ -195,8 +202,8 @@ PrivateKey = $SERVER_PRIVATE
 Address = $IPV4_RANGE.1/24${IPV6_RANGE:+, $IPV6_RANGE:1/64}
 ListenPort = $WG_PORT
 MTU = $MTU
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
 EOF
     chmod 600 "$WG_CONFIG"
 }
@@ -216,6 +223,8 @@ add_client() {
         msg "error" "العنوان $client_ip مستخدم"
         return
     fi
+    mkdir -p "$CLIENT_DIR"
+    chmod 700 "$CLIENT_DIR"
     wg genkey | tee "$CLIENT_DIR/$client_name.key" | wg pubkey > "$CLIENT_DIR/$client_name.pub"
     wg genpsk > "$CLIENT_DIR/$client_name.psk"
     [[ -s "$CLIENT_DIR/$client_name.key" ]] || msg "error" "فشل إنشاء مفتاح العميل"
@@ -250,6 +259,9 @@ PersistentKeepalive = $KEEPALIVE
 EOF
     chmod 600 "$CLIENT_DIR/$client_name.conf"
     systemctl restart wg-quick@wg0
+    if ! systemctl is-active wg-quick@wg0 >/dev/null; then
+        msg "warning" "فشل تشغيل خدمة wg-quick@wg0، تحقق من 'systemctl status wg-quick@wg0.service' و 'journalctl -xeu wg-quick@wg0.service'"
+    fi
     qrencode -t ansiutf8 < "$CLIENT_DIR/$client_name.conf"
     test_connection "$client_name"
     msg "success" "تم إضافة $client_name، التكوين في $CLIENT_DIR/$client_name.conf"
@@ -303,9 +315,9 @@ remove_wireguard() {
     else
         iptables -D INPUT -p udp --dport "$WG_PORT" -j ACCEPT
         iptables -D FORWARD -i wg0 -j ACCEPT
-        iptables -t nat -D POSTROUTING -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -j MASQUERADE
+        iptables -t nat -D POSTROUTING -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -o "$DEFAULT_INTERFACE" -j MASQUERADE
         [[ -n "$IPV6_RANGE" ]] && ip6tables -D FORWARD -i wg0 -j ACCEPT
-        [[ -n "$IPV6_RANGE" ]] && ip6tables -t nat -D POSTROUTING -s "$IPV6_RANGE"::/64 -j MASQUERADE
+        [[ -n "$IPV6_RANGE" ]] && ip6tables -t nat -D POSTROUTING -s "$IPV6_RANGE"::/64 -o "$DEFAULT_INTERFACE" -j MASQUERADE
     fi
     case $os in
         "ubuntu"|"debian") apt remove -y wireguard ;;
@@ -390,7 +402,7 @@ elif [[ $DEFAULT_MODE ]]; then
     optimize_sysctl
     setup_server
     systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0
+    systemctl start wg-quick@wg0 || msg "warning" "فشل تشغيل الخدمة، تحقق من 'systemctl status wg-quick@wg0.service'"
     add_client
     echo -e "${GREEN}تم التثبيت بالوضع الافتراضي! [========>]${NC}"
 elif [[ $AUTO ]]; then
@@ -400,7 +412,7 @@ elif [[ $AUTO ]]; then
     optimize_sysctl
     setup_server
     systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0
+    systemctl start wg-quick@wg0 || msg "warning" "فشل تشغيل الخدمة، تحقق من 'systemctl status wg-quick@wg0.service'"
     add_client "$CLIENT_NAME"
 else
     if [[ -f "$WG_CONFIG" ]]; then
@@ -434,7 +446,7 @@ else
                 optimize_sysctl
                 setup_server
                 systemctl enable wg-quick@wg0
-                systemctl start wg-quick@wg0
+                systemctl start wg-quick@wg0 || msg "warning" "فشل تشغيل الخدمة، تحقق من 'systemctl status wg-quick@wg0.service'"
                 add_client
                 echo -e "${GREEN}تم التثبيت بالوضع الافتراضي! [========>]${NC}"
                 ;;
@@ -447,7 +459,7 @@ else
                 select_dns
                 setup_server
                 systemctl enable wg-quick@wg0
-                systemctl start wg-quick@wg0
+                systemctl start wg-quick@wg0 || msg "warning" "فشل تشغيل الخدمة، تحقق من 'systemctl status wg-quick@wg0.service'"
                 add_client
                 echo -e "${GREEN}تم إكمال التثبيت بالوضع الاختياري! [========>]${NC}"
                 ;;
