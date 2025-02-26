@@ -3,6 +3,9 @@
 # سكريبت تثبيت وإدارة WireGuard محسّن مع وضع افتراضي واختياري
 # (بتاريخ 26 فبراير 2025)
 
+# ضبط umask لضمان أذونات آمنة
+umask 077
+
 # ألوان
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -80,9 +83,12 @@ detect_public_ip() {
 }
 
 detect_interface() {
-    # اكتشاف واجهة الشبكة الافتراضية
     DEFAULT_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-    [[ -z "$DEFAULT_INTERFACE" ]] && DEFAULT_INTERFACE="eth0"  # الرجوع إلى eth0 إذا لم يتم العثور على واجهة
+    if [[ -z "$DEFAULT_INTERFACE" ]]; then
+        echo -e "${YELLOW}لم يتم اكتشاف واجهة شبكة افتراضية${NC}"
+        read -p "أدخل اسم واجهة الشبكة (مثل eth0): " DEFAULT_INTERFACE
+        [[ -z "$DEFAULT_INTERFACE" ]] && msg "error" "يجب تحديد واجهة شبكة"
+    fi
 }
 
 install_deps() {
@@ -145,6 +151,7 @@ net.ipv4.tcp_mtu_probing=1
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
+    chmod 600 /etc/sysctl.d/99-wireguard-optimize.conf
     if modprobe tcp_bbr &>/dev/null && [[ $(uname -r) > "4.20" ]]; then
         sysctl -p /etc/sysctl.d/99-wireguard-optimize.conf
         msg "success" "تم تحسين إعدادات sysctl مع BBR"
@@ -223,8 +230,6 @@ add_client() {
         msg "error" "العنوان $client_ip مستخدم"
         return
     fi
-    mkdir -p "$CLIENT_DIR"
-    chmod 700 "$CLIENT_DIR"
     wg genkey | tee "$CLIENT_DIR/$client_name.key" | wg pubkey > "$CLIENT_DIR/$client_name.pub"
     wg genpsk > "$CLIENT_DIR/$client_name.psk"
     [[ -s "$CLIENT_DIR/$client_name.key" ]] || msg "error" "فشل إنشاء مفتاح العميل"
@@ -260,7 +265,9 @@ EOF
     chmod 600 "$CLIENT_DIR/$client_name.conf"
     systemctl restart wg-quick@wg0
     if ! systemctl is-active wg-quick@wg0 >/dev/null; then
-        msg "warning" "فشل تشغيل خدمة wg-quick@wg0، تحقق من 'systemctl status wg-quick@wg0.service' و 'journalctl -xeu wg-quick@wg0.service'"
+        msg "warning" "فشل تشغيل خدمة wg-quick@wg0، تحقق من السجلات أدناه"
+        systemctl status wg-quick@wg0.service
+        echo -e "${YELLOW}يمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service${NC}"
     fi
     qrencode -t ansiutf8 < "$CLIENT_DIR/$client_name.conf"
     test_connection "$client_name"
@@ -402,7 +409,11 @@ elif [[ $DEFAULT_MODE ]]; then
     optimize_sysctl
     setup_server
     systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0 || msg "warning" "فشل تشغيل الخدمة، تحقق من 'systemctl status wg-quick@wg0.service'"
+    systemctl start wg-quick@wg0 || {
+        msg "warning" "فشل تشغيل الخدمة، تحقق من السجلات أدناه"
+        systemctl status wg-quick@wg0.service
+        echo -e "${YELLOW}يمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service${NC}"
+    }
     add_client
     echo -e "${GREEN}تم التثبيت بالوضع الافتراضي! [========>]${NC}"
 elif [[ $AUTO ]]; then
@@ -412,7 +423,11 @@ elif [[ $AUTO ]]; then
     optimize_sysctl
     setup_server
     systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0 || msg "warning" "فشل تشغيل الخدمة، تحقق من 'systemctl status wg-quick@wg0.service'"
+    systemctl start wg-quick@wg0 || {
+        msg "warning" "فشل تشغيل الخدمة، تحقق من السجلات أدناه"
+        systemctl status wg-quick@wg0.service
+        echo -e "${YELLOW}يمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service${NC}"
+    }
     add_client "$CLIENT_NAME"
 else
     if [[ -f "$WG_CONFIG" ]]; then
@@ -446,7 +461,11 @@ else
                 optimize_sysctl
                 setup_server
                 systemctl enable wg-quick@wg0
-                systemctl start wg-quick@wg0 || msg "warning" "فشل تشغيل الخدمة، تحقق من 'systemctl status wg-quick@wg0.service'"
+                systemctl start wg-quick@wg0 || {
+                    msg "warning" "فشل تشغيل الخدمة، تحقق من السجلات أدناه"
+                    systemctl status wg-quick@wg0.service
+                    echo -e "${YELLOW}يمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service${NC}"
+                }
                 add_client
                 echo -e "${GREEN}تم التثبيت بالوضع الافتراضي! [========>]${NC}"
                 ;;
@@ -459,7 +478,11 @@ else
                 select_dns
                 setup_server
                 systemctl enable wg-quick@wg0
-                systemctl start wg-quick@wg0 || msg "warning" "فشل تشغيل الخدمة، تحقق من 'systemctl status wg-quick@wg0.service'"
+                systemctl start wg-quick@wg0 || {
+                    msg "warning" "فشل تشغيل الخدمة، تحقق من السجلات أدناه"
+                    systemctl status wg-quick@wg0.service
+                    echo -e "${YELLOW}يمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service${NC}"
+                }
                 add_client
                 echo -e "${GREEN}تم إكمال التثبيت بالوضع الاختياري! [========>]${NC}"
                 ;;
