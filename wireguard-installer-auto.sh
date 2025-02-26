@@ -103,7 +103,6 @@ ENDPOINT_IP=""
 ENDPOINT_NAME=""
 PORT_DEFAULT=51820
 FIRST_USER="user"
-ENABLE_IPV6=1
 AUTO_SETUP=0
 ADD_USER=0
 LIST_USERS=0
@@ -111,6 +110,7 @@ DEL_USER=0
 SHOW_QR=0
 UNINSTALL=0
 CONFIRM_YES=0
+ENABLE_IPV6=0  # Default to disabled, will prompt user
 
 # Parse command-line flags
 parse_options() {
@@ -241,6 +241,8 @@ detect_ip_address() {
         fi
     fi
     is_private_ip "$ENDPOINT_IP" && PUBLIC_IP=$(curl -s http://ipv4.icanhazip.com || fail "Failed to detect public IP for NAT.")
+    echo -e "${BLUE}Detected Server IP: $ENDPOINT_IP${NC}"
+    [ -n "$PUBLIC_IP" ] && echo -e "${BLUE}Public IP (NAT): $PUBLIC_IP${NC}"
 }
 
 select_ip_manually() {
@@ -270,6 +272,24 @@ set_port() {
         done
     else
         PORT_NUM="${PORT_NUM:-51820}"
+    fi
+    echo -e "${BLUE}Using Port: $PORT_NUM${NC}"
+}
+
+set_ip_version() {
+    # Choose IPv4, IPv6, or both
+    if [ "$AUTO_SETUP" = 0 ]; then
+        echo -e "\nEnable IPv6 support alongside IPv4? [y/N]:"
+        read -r ipv6_choice
+        case "$ipv6_choice" in
+            [yY]*) ENABLE_IPV6=1 ;;
+            *) ENABLE_IPV6=0 ;;
+        esac
+    fi
+    if [ "$ENABLE_IPV6" = 1 ]; then
+        echo -e "${BLUE}IPv6 Enabled: Server will use both IPv4 (${VPN_IPV4}.1/24) and IPv6 (${VPN_IPV6}1/64)${NC}"
+    else
+        echo -e "${BLUE}IPv6 Disabled: Server will use IPv4 only (${VPN_IPV4}.1/24)${NC}"
     fi
 }
 
@@ -322,6 +342,7 @@ choose_dns() {
             [ -n "$custom_sec" ] && DNS_SET="$custom_pri, $custom_sec"
             ;;
     esac
+    echo -e "${BLUE}Selected DNS: $DNS_SET${NC}"
 }
 
 set_initial_user() {
@@ -334,6 +355,7 @@ set_initial_user() {
         FIRST_USER="$SAFE_NAME"
     fi
     [ -z "$FIRST_USER" ] && FIRST_USER="user"
+    echo -e "${BLUE}Initial User: $FIRST_USER${NC}"
 }
 
 prepare_install() {
@@ -397,7 +419,12 @@ setup_firewall() {
         iptables -A FORWARD -s "${VPN_IPV4}.0/24" -j ACCEPT
         iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
         iptables -t nat -A POSTROUTING -s "${VPN_IPV4}.0/24" -o "$net_if" -j MASQUERADE
-        [ "$ENABLE_IPV6" = 1 ] && ip6tables -t nat -A POSTROUTING -s "${VPN_IPV6}/64" -o "$net_if" -j MASQUERADE
+        if [ "$ENABLE_IPV6" = 1 ]; then
+            ip6tables -A INPUT -p udp --dport "$PORT_NUM" -j ACCEPT
+            ip6tables -A FORWARD -s "${VPN_IPV6}/64" -j ACCEPT
+            ip6tables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+            ip6tables -t nat -A POSTROUTING -s "${VPN_IPV6}/64" -o "$net_if" -j MASQUERADE
+        fi
     fi
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-vpn.conf
     [ "$ENABLE_IPV6" = 1 ] && echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-vpn.conf
@@ -408,10 +435,31 @@ add_vpn_user() {
     # Add a new VPN user
     local user_name="${1:-$FIRST_USER}"
     local ip_octet=2
-    while grep -q "AllowedIPs = ${VPN_IPV4}.$ip_octet/32" "$VPN_CONFIG"; do
-        ((ip_octet++))
-    done
-    [ "$ip_octet" -eq 255 ] && fail "VPN subnet full. Max 253 users."
+    local custom_ip=""
+    if [ "$AUTO_SETUP" = 0 ] || [ "$ADD_USER" = 1 ]; then
+        echo -e "\nAssign a custom IP for '$user_name'? [y/N]:"
+        read -r custom_choice
+        if [[ "$custom_choice" =~ ^[yY]$ ]]; then
+            echo "Enter IPv4 address (e.g., ${VPN_IPV4}.X, where X is 2-254):"
+            read -r custom_ip
+            ip_octet=$(echo "$custom_ip" | cut -d '.' -f 4)
+            until [[ "$custom_ip" =~ ^${VPN_IPV4}\.([2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])$ ]] && ! grep -q "AllowedIPs = ${VPN_IPV4}.$ip_octet/32" "$VPN_CONFIG"; do
+                if [[ ! "$custom_ip" =~ ^${VPN_IPV4}\.([2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])$ ]]; then
+                    echo "Invalid IP. Must be in range ${VPN_IPV4}.2 to ${VPN_IPV4}.254."
+                else
+                    echo "IP already in use."
+                fi
+                read -r custom_ip
+                ip_octet=$(echo "$custom_ip" | cut -d '.' -f 4)
+            done
+        fi
+    fi
+    if [ -z "$custom_ip" ]; then
+        while grep -q "AllowedIPs = ${VPN_IPV4}.$ip_octet/32" "$VPN_CONFIG"; do
+            ((ip_octet++))
+        done
+        [ "$ip_octet" -eq 255 ] && fail "VPN subnet full. Max 253 users."
+    fi
     TEMP_KEY=$(mktemp)
     TEMP_PSK=$(mktemp)
     wg genkey > "$TEMP_KEY"
@@ -442,14 +490,16 @@ PrivateKey = $USER_KEY
 [Peer]
 PublicKey = $SERVER_PUB
 PresharedKey = $USER_PSK
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = 0.0.0.0/0$( [ "$ENABLE_IPV6" = 1 ] && echo ", ::/0" )
 Endpoint = $ENDPOINT_IP:$PORT_NUM
 PersistentKeepalive = $KEEPALIVE_DEFAULT
 EOF
     chmod 600 "$USER_DIR/$user_name.conf"
-    systemctl restart wg-quick@wg0
+    systemctl restart wg-quick@wg0 || fail "Failed to restart WireGuard service."
+    echo -e "${GREEN}User '$user_name' added with IP: ${VPN_IPV4}.$ip_octet${NC}"
+    [ "$ENABLE_IPV6" = 1 ] && echo -e "${GREEN}IPv6 IP: ${VPN_IPV6}$ip_octet${NC}"
     qrencode -t UTF8 < "$USER_DIR/$user_name.conf"
-    echo -e "${GREEN}User '$user_name' added. Config saved to: $USER_DIR/$user_name.conf${NC}"
+    echo -e "${BLUE}Config saved to: $USER_DIR/$user_name.conf${NC}"
 }
 
 start_service() {
@@ -484,7 +534,7 @@ remove_user() {
     SAFE_NAME=$(grep '^# BEGIN_PEER' "$VPN_CONFIG" | cut -d ' ' -f 3 | sed -n "${user_num}p")
     sed -i "/^# BEGIN_PEER $SAFE_NAME$/,/^# END_PEER $SAFE_NAME$/d" "$VPN_CONFIG"
     rm -f "$USER_DIR/$SAFE_NAME.conf" "$USER_DIR/$SAFE_NAME.key" "$USER_DIR/$SAFE_NAME.pub" "$USER_DIR/$SAFE_NAME.psk"
-    systemctl restart wg-quick@wg0
+    systemctl restart wg-quick@wg0 || fail "Failed to restart WireGuard service after user removal."
     echo -e "${GREEN}User '$SAFE_NAME' removed.${NC}"
 }
 
@@ -509,14 +559,17 @@ uninstall_vpn() {
     systemctl stop wg-quick@wg0
     systemctl disable wg-quick@wg0
     rm -rf /etc/wireguard "$USER_DIR" /etc/sysctl.d/99-vpn.conf
-    iptables -D INPUT -p udp --dport "$PORT_NUM" -j ACCEPT
-    iptables -t nat -D POSTROUTING -s "${VPN_IPV4}.0/24" -j MASQUERADE
-    [ "$ENABLE_IPV6" = 1 ] && ip6tables -t nat -D POSTROUTING -s "${VPN_IPV6}/64" -j MASQUERADE
+    iptables -D INPUT -p udp --dport "$PORT_NUM" -j ACCEPT 2>/dev/null
+    iptables -t nat -D POSTROUTING -s "${VPN_IPV4}.0/24" -j MASQUERADE 2>/dev/null
+    if [ "$ENABLE_IPV6" = 1 ]; then
+        ip6tables -D INPUT -p udp --dport "$PORT_NUM" -j ACCEPT 2>/dev/null
+        ip6tables -t nat -D POSTROUTING -s "${VPN_IPV6}/64" -j MASQUERADE 2>/dev/null
+    fi
     case "$SYS_TYPE" in
-        "ubuntu"|"debian") apt-get remove -y wireguard qrencode iptables ;;
-        "centos") yum remove -y wireguard-tools qrencode iptables ;;
-        "fedora") dnf remove -y wireguard-tools qrencode iptables ;;
-        "openSUSE") zypper remove -y wireguard-tools qrencode iptables ;;
+        "ubuntu"|"debian") apt-get remove -y wireguard qrencode iptables 2>/dev/null ;;
+        "centos") yum remove -y wireguard-tools qrencode iptables 2>/dev/null ;;
+        "fedora") dnf remove -y wireguard-tools qrencode iptables 2>/dev/null ;;
+        "openSUSE") zypper remove -y wireguard-tools qrencode iptables 2>/dev/null ;;
     esac
     echo -e "${GREEN}WireGuard uninstalled.${NC}"
 }
@@ -548,6 +601,7 @@ main() {
         welcome_message
         fetch_endpoint
         set_port
+        set_ip_version
         choose_dns
         setup_packages
         configure_vpn
@@ -578,6 +632,7 @@ main() {
             welcome_message
             fetch_endpoint
             set_port
+            set_ip_version
             set_initial_user
             choose_dns
             prepare_install
