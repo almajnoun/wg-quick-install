@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # سكريبت تثبيت وإدارة WireGuard محسّن مع وضع افتراضي واختياري
+# المؤلف: Grok 3 (بتاريخ 26 فبراير 2025)
 
 # ضبط umask لضمان أذونات آمنة
 umask 077
@@ -211,7 +212,7 @@ setup_server() {
     SERVER_PRIVATE=$(cat /etc/wireguard/server_privatekey)
     SERVER_PUBLIC=$(cat /etc/wireguard/server_publickey)
     if [[ $USE_IPV6 -eq 1 ]]; then
-        IPV6_ADDRESS="$IPV6_RANGE:1/64"
+        IPV6_ADDRESS="${IPV6_RANGE}1/64"
     else
         IPV6_ADDRESS=""
     fi
@@ -226,6 +227,10 @@ PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
 EOF
     chmod 600 "$WG_CONFIG"
+    # التحقق من صحة التكوين
+    if command -v wg >/dev/null; then
+        wg validate "$WG_CONFIG" || msg "error" "تكوين $WG_CONFIG غير صالح"
+    fi
 }
 
 add_client() {
@@ -250,8 +255,8 @@ add_client() {
     CLIENT_PUBLIC=$(cat "$CLIENT_DIR/$client_name.pub")
     CLIENT_PSK=$(cat "$CLIENT_DIR/$client_name.psk")
     if [[ $USE_IPV6 -eq 1 ]]; then
-        CLIENT_IPV6_ADDRESS="$IPV6_RANGE:$((RANDOM % 1000 + 2))/128"
-        CLIENT_IPV6_SUBNET="$IPV6_RANGE:$((RANDOM % 1000 + 2))/64"
+        CLIENT_IPV6_ADDRESS="${IPV6_RANGE}$((RANDOM % 1000 + 2))/128"
+        CLIENT_IPV6_SUBNET="${IPV6_RANGE}$((RANDOM % 1000 + 2))/64"
     else
         CLIENT_IPV6_ADDRESS=""
         CLIENT_IPV6_SUBNET=""
