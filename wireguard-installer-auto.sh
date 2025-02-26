@@ -25,7 +25,7 @@ PUBLIC_IP=""
 SERVER_ADDR=""
 CLIENT_NAME="client"
 MTU=1420
-USE_IPV6=1  # 1 لتفعيل IPv6، 0 لتعطيله
+USE_IPV6=1
 
 # دوال مساعدة
 msg() {
@@ -84,10 +84,10 @@ detect_public_ip() {
 
 detect_interface() {
     DEFAULT_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-    if [[ -z "$DEFAULT_INTERFACE" ]]; then
-        echo -e "${YELLOW}لم يتم اكتشاف واجهة شبكة افتراضية${NC}"
-        read -p "أدخل اسم واجهة الشبكة (مثل eth0): " DEFAULT_INTERFACE
-        [[ -z "$DEFAULT_INTERFACE" ]] && msg "error" "يجب تحديد واجهة شبكة"
+    if [[ -z "$DEFAULT_INTERFACE" ]] || ! ip link show "$DEFAULT_INTERFACE" >/dev/null 2>&1; then
+        echo -e "${YELLOW}لم يتم اكتشاف واجهة شبكة افتراضية صالحة${NC}"
+        read -p "أدخل اسم واجهة الشبكة (مثل eth0 أو ens3): " DEFAULT_INTERFACE
+        ip link show "$DEFAULT_INTERFACE" >/dev/null 2>&1 || msg "error" "الواجهة $DEFAULT_INTERFACE غير موجودة"
     fi
 }
 
@@ -285,9 +285,7 @@ EOF
     chmod 600 "$CLIENT_DIR/$client_name.conf"
     systemctl restart wg-quick@wg0
     if ! systemctl is-active wg-quick@wg0 >/dev/null; then
-        msg "warning" "فشل تشغيل خدمة wg-quick@wg0، تحقق من السجلات أدناه"
-        systemctl status wg-quick@wg0.service
-        echo -e "${YELLOW}يمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service${NC}"
+        msg "error" "فشل تشغيل خدمة wg-quick@wg0، تحقق من السجلات أدناه\n$(systemctl status wg-quick@wg0.service)\nيمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service"
     fi
     qrencode -t ansiutf8 < "$CLIENT_DIR/$client_name.conf"
     test_connection "$client_name"
@@ -431,11 +429,7 @@ elif [[ $DEFAULT_MODE ]]; then
     optimize_sysctl
     setup_server
     systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0 || {
-        msg "warning" "فشل تشغيل الخدمة، تحقق من السجلات أدناه"
-        systemctl status wg-quick@wg0.service
-        echo -e "${YELLOW}يمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service${NC}"
-    }
+    systemctl start wg-quick@wg0 || msg "error" "فشل تشغيل الخدمة، تحقق من السجلات أدناه\n$(systemctl status wg-quick@wg0.service)\nيمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service"
     add_client
     echo -e "${GREEN}تم التثبيت بالوضع الافتراضي! [========>]${NC}"
 elif [[ $AUTO ]]; then
@@ -445,11 +439,7 @@ elif [[ $AUTO ]]; then
     optimize_sysctl
     setup_server
     systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0 || {
-        msg "warning" "فشل تشغيل الخدمة، تحقق من السجلات أدناه"
-        systemctl status wg-quick@wg0.service
-        echo -e "${YELLOW}يمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service${NC}"
-    }
+    systemctl start wg-quick@wg0 || msg "error" "فشل تشغيل الخدمة، تحقق من السجلات أدناه\n$(systemctl status wg-quick@wg0.service)\nيمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service"
     add_client "$CLIENT_NAME"
 else
     if [[ -f "$WG_CONFIG" ]]; then
@@ -483,11 +473,7 @@ else
                 optimize_sysctl
                 setup_server
                 systemctl enable wg-quick@wg0
-                systemctl start wg-quick@wg0 || {
-                    msg "warning" "فشل تشغيل الخدمة، تحقق من السجلات أدناه"
-                    systemctl status wg-quick@wg0.service
-                    echo -e "${YELLOW}يمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service${NC}"
-                }
+                systemctl start wg-quick@wg0 || msg "error" "فشل تشغيل الخدمة، تحقق من السجلات أدناه\n$(systemctl status wg-quick@wg0.service)\nيمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service"
                 add_client
                 echo -e "${GREEN}تم التثبيت بالوضع الافتراضي! [========>]${NC}"
                 ;;
@@ -500,11 +486,7 @@ else
                 select_dns
                 setup_server
                 systemctl enable wg-quick@wg0
-                systemctl start wg-quick@wg0 || {
-                    msg "warning" "فشل تشغيل الخدمة، تحقق من السجلات أدناه"
-                    systemctl status wg-quick@wg0.service
-                    echo -e "${YELLOW}يمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service${NC}"
-                }
+                systemctl start wg-quick@wg0 || msg "error" "فشل تشغيل الخدمة، تحقق من السجلات أدناه\n$(systemctl status wg-quick@wg0.service)\nيمكنك أيضًا التحقق من التفاصيل باستخدام: journalctl -xeu wg-quick@wg0.service"
                 add_client
                 echo -e "${GREEN}تم إكمال التثبيت بالوضع الاختياري! [========>]${NC}"
                 ;;
