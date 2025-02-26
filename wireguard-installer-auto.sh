@@ -101,7 +101,8 @@ DNS_DEFAULT="8.8.8.8, 8.8.4.4"
 KEEPALIVE_DEFAULT=25
 ENDPOINT_IP=""
 ENDPOINT_NAME=""
-PORT_NUM=$PORT_DEFAULT  # Initialize PORT_NUM with default value
+PORT_DEFAULT=51820
+PORT_NUM="$PORT_DEFAULT"  # Initialize PORT_NUM with default value
 FIRST_USER="user"
 AUTO_SETUP=0
 ADD_USER=0
@@ -266,13 +267,13 @@ set_port() {
         read -r port_input
         PORT_NUM="${port_input:-51820}"
         until [[ "$PORT_NUM" =~ ^[0-9]+$ && "$PORT_NUM" -le 65535 ]]; do
-            echo "Invalid port number."
+            echo "Invalid port number. Must be between 1 and 65535."
             read -r port_input
             PORT_NUM="${port_input:-51820}"
         done
-    else
-        PORT_NUM="${PORT_NUM:-$PORT_DEFAULT}"
     fi
+    # Ensure PORT_NUM is always set, even in auto mode
+    PORT_NUM="${PORT_NUM:-$PORT_DEFAULT}"
     echo -e "${BLUE}Using Port: $PORT_NUM${NC}"
 }
 
@@ -495,7 +496,12 @@ Endpoint = $ENDPOINT_IP:$PORT_NUM
 PersistentKeepalive = $KEEPALIVE_DEFAULT
 EOF
     chmod 600 "$USER_DIR/$user_name.conf"
-    systemctl restart wg-quick@wg0 || fail "Failed to restart WireGuard service."
+    systemctl restart wg-quick@wg0
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to restart WireGuard service. Check logs:${NC}"
+        systemctl status wg-quick@wg0.service
+        fail "Service restart failed."
+    fi
     echo -e "${GREEN}User '$user_name' added with IP: ${VPN_IPV4}.$ip_octet${NC}"
     [ "$ENABLE_IPV6" = 1 ] && echo -e "${GREEN}IPv6 IP: ${VPN_IPV6}$ip_octet${NC}"
     qrencode -t UTF8 < "$USER_DIR/$user_name.conf"
@@ -505,7 +511,12 @@ EOF
 start_service() {
     # Start and enable WireGuard service
     systemctl enable wg-quick@wg0.service
-    systemctl start wg-quick@wg0.service || fail "Failed to start VPN service."
+    systemctl start wg-quick@wg0.service
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to start WireGuard service. Check logs:${NC}"
+        systemctl status wg-quick@wg0.service
+        fail "Service start failed."
+    fi
 }
 
 complete_setup() {
@@ -534,7 +545,12 @@ remove_user() {
     SAFE_NAME=$(grep '^# BEGIN_PEER' "$VPN_CONFIG" | cut -d ' ' -f 3 | sed -n "${user_num}p")
     sed -i "/^# BEGIN_PEER $SAFE_NAME$/,/^# END_PEER $SAFE_NAME$/d" "$VPN_CONFIG"
     rm -f "$USER_DIR/$SAFE_NAME.conf" "$USER_DIR/$SAFE_NAME.key" "$USER_DIR/$SAFE_NAME.pub" "$USER_DIR/$SAFE_NAME.psk"
-    systemctl restart wg-quick@wg0 || fail "Failed to restart WireGuard service after user removal."
+    systemctl restart wg-quick@wg0
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to restart WireGuard service after removal. Check logs:${NC}"
+        systemctl status wg-quick@wg0.service
+        fail "Service restart failed."
+    fi
     echo -e "${GREEN}User '$SAFE_NAME' removed.${NC}"
 }
 
@@ -586,9 +602,7 @@ main() {
     check_container_env
 
     # Ensure PORT_NUM is set before proceeding with setup
-    if [ "$AUTO_SETUP" = 1 ] || [ -z "$PORT_NUM" ]; then
-        set_port
-    fi
+    set_port  # Moved to ensure port is set early
 
     if [ "$ADD_USER" = 1 ]; then
         sanitize_name
@@ -635,7 +649,6 @@ main() {
         else
             welcome_message
             fetch_endpoint
-            set_port  # Ensure port is set during initial setup
             set_ip_version
             set_initial_user
             choose_dns
