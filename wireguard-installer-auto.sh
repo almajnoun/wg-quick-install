@@ -1,5 +1,6 @@
 #!/bin/bash
-
+#
+#
 # ضبط umask لضمان أذونات آمنة
 umask 077
 
@@ -10,189 +11,755 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# متغيرات افتراضية
-WG_PORT=51820
-WG_CONFIG="/etc/wireguard/wg0.conf"
-CLIENT_DIR="$HOME/wireguard-clients"
-IPV4_RANGE="10.0.0"
-IPV6_RANGE="fd00::"
-DNS_SERVER="8.8.8.8, 8.8.4.4"
-KEEPALIVE=25
-PUBLIC_IP=""
-CLIENT_NAME="client"
-MTU=1420
-USE_IPV6=1
+exiterr()  { echo -e "${RED}Error: $1${NC}" >&2; exit 1; }
+exiterr2() { exiterr "'apt-get install' failed."; }
+exiterr3() { exiterr "'yum install' failed."; }
+exiterr4() { exiterr "'zypper install' failed."; }
 
-# دوال مساعدة
-msg() {
-    case $1 in
-        "error") echo -e "${RED}خطأ: $2${NC}" >&2; exit 1 ;;
-        "success") echo -e "${GREEN}نجاح: $2${NC}" ;;
-        "info") echo -e "${BLUE}معلومات: $2${NC}" ;;
-        "warning") echo -e "${YELLOW}تحذير: $2${NC}" ;;
-    esac
+check_ip() {
+    IP_REGEX='^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'
+    printf '%s' "$1" | tr -d '\n' | grep -Eq "$IP_REGEX"
 }
 
-check_root() { [[ $EUID -ne 0 ]] && msg "error" "يجب تشغيل السكريبت كـ root"; }
+check_pvt_ip() {
+    IPP_REGEX='^(10|127|172\.(1[6-9]|2[0-9]|3[0-1])|192\.168|169\.254)\.'
+    printf '%s' "$1" | tr -d '\n' | grep -Eq "$IPP_REGEX"
+}
+
+check_dns_name() {
+    FQDN_REGEX='^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+    printf '%s' "$1" | tr -d '\n' | grep -Eq "$FQDN_REGEX"
+}
+
+check_root() {
+    if [ "$(id -u)" != 0 ]; then
+        exiterr "This installer must be run as root. Try 'sudo bash $0'"
+    fi
+}
+
+check_shell() {
+    if readlink /proc/$$/exe | grep -q "dash"; then
+        exiterr 'This installer needs to be run with "bash", not "sh".'
+    fi
+}
 
 check_kernel() {
-    [[ $(uname -r | cut -d "." -f 1) -eq 2 ]] && msg "error" "النواة قديمة جدًا";
-    systemd-detect-virt -cq 2>/dev/null && msg "error" "الحاويات غير مدعومة";
+    if [[ $(uname -r | cut -d "." -f 1) -eq 2 ]]; then
+        exiterr "The system is running an old kernel, which is incompatible with this installer."
+    fi
 }
 
 check_os() {
     if grep -qs "ubuntu" /etc/os-release; then
-        os="ubuntu"; os_version=$(grep 'VERSION_ID' /etc/os-release | cut -d '"' -f 2 | tr -d '.')
-        [[ "$os_version" -lt 2004 ]] && msg "error" "Ubuntu 20.04+ مطلوب";
+        os="ubuntu"
+        os_version=$(grep 'VERSION_ID' /etc/os-release | cut -d '"' -f 2 | tr -d '.')
     elif [[ -e /etc/debian_version ]]; then
-        os="debian"; os_version=$(grep -oE '[0-9]+' /etc/debian_version | head -1)
-        [[ "$os_version" -lt 11 ]] && msg "error" "Debian 11+ مطلوب";
-    elif [[ -e /etc/centos-release ]]; then
-        os="centos"; os_version=$(grep -oE '[0-9]+' /etc/centos-release | head -1)
-        [[ "$os_version" -lt 8 ]] && msg "error" "CentOS 8+ مطلوب";
+        os="debian"
+        os_version=$(grep -oE '[0-9]+' /etc/debian_version | head -1)
+    elif [[ -e /etc/almalinux-release || -e /etc/rocky-release || -e /etc/centos-release ]]; then
+        os="centos"
+        os_version=$(grep -shoE '[0-9]+' /etc/almalinux-release /etc/rocky-release /etc/centos-release | head -1)
     elif [[ -e /etc/fedora-release ]]; then
-        os="fedora"; os_version=$(grep -oE '[0-9]+' /etc/fedora-release | head -1)
-    elif [[ -e /etc/opensuse-release ]]; then
-        os="opensuse"
+        os="fedora"
+        os_version=$(grep -oE '[0-9]+' /etc/fedora-release | head -1)
+    elif [[ -e /etc/SUSE-brand && "$(head -1 /etc/SUSE-brand)" == "openSUSE" ]]; then
+        os="openSUSE"
+        os_version=$(tail -1 /etc/SUSE-brand | grep -oE '[0-9\\.]+')
     else
-        msg "error" "نظام غير مدعوم"
+        exiterr "This installer seems to be running on an unsupported distribution.
+Supported distros are Ubuntu, Debian, AlmaLinux, Rocky Linux, CentOS, Fedora and openSUSE."
     fi
 }
 
-check_ip() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
-
-detect_public_ip() {
-    PUBLIC_IP=$(ip -4 addr | grep inet | grep -v '127' | awk '{print $2}' | cut -d '/' -f 1 | head -1)
-    if ! check_ip "$PUBLIC_IP"; then
-        PUBLIC_IP=$(curl -s ifconfig.me || curl -s icanhazip.com)
+check_os_ver() {
+    if [[ "$os" == "ubuntu" && "$os_version" -lt 2004 ]]; then
+        exiterr "Ubuntu 20.04 or higher is required."
     fi
-    if ! check_ip "$PUBLIC_IP"; then
-        read -p "فشل اكتشاف IP العام، أدخله يدويًا: " PUBLIC_IP
-        check_ip "$PUBLIC_IP" || msg "error" "IP غير صالح"
+    if [[ "$os" == "debian" && "$os_version" -lt 11 ]]; then
+        exiterr "Debian 11 or higher is required."
     fi
-}
-
-detect_interface() {
-    DEFAULT_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-    if [[ -z "$DEFAULT_INTERFACE" ]] || ! ip link show "$DEFAULT_INTERFACE" >/dev/null 2>&1; then
-        echo -e "${YELLOW}لم يتم اكتشاف واجهة شبكة${NC}"
-        read -p "أدخل اسم الواجهة (مثل eth0): " DEFAULT_INTERFACE
-        ip link show "$DEFAULT_INTERFACE" >/dev/null 2>&1 || msg "error" "الواجهة $DEFAULT_INTERFACE غير موجودة"
+    if [[ "$os" == "centos" && "$os_version" -lt 8 ]]; then
+        exiterr "CentOS 8 or higher is required."
     fi
 }
 
-install_deps() {
-    echo -e "${YELLOW}جارٍ تثبيت الحزم... [===>]${NC}"
-    case $os in
-        "ubuntu"|"debian") apt update && apt install -y wireguard qrencode iptables iproute2 ;;
-        "centos") yum install -y epel-release && yum install -y wireguard-tools qrencode iptables ;;
-        "fedora") dnf install -y wireguard-tools qrencode iptables ;;
-        "opensuse") zypper install -y wireguard-tools qrencode iptables ;;
-    esac
-    mkdir -p /etc/wireguard "$CLIENT_DIR"
-    chmod 700 /etc/wireguard "$CLIENT_DIR"
-    echo -e "${GREEN}تم التثبيت [========>]${NC}"
-}
-
-setup_firewall() {
-    detect_interface
-    if command -v firewall-cmd &>/dev/null; then
-        firewall-cmd --permanent --add-port="$WG_PORT"/udp
-        firewall-cmd --permanent --zone=trusted --add-source="$IPV4_RANGE".0/24
-        firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -j MASQUERADE
-        [[ $USE_IPV6 -eq 1 ]] && firewall-cmd --permanent --zone=trusted --add-source="$IPV6_RANGE"/64
-        firewall-cmd --reload
-    else
-        iptables_path=$(command -v iptables)
-        ip6tables_path=$(command -v ip6tables)
-        [[ $(systemd-detect-virt) == "openvz" ]] && command -v iptables-legacy &>/dev/null && iptables_path=$(command -v iptables-legacy)
-        $iptables_path -A INPUT -p udp --dport "$WG_PORT" -j ACCEPT
-        $iptables_path -A FORWARD -i wg0 -j ACCEPT
-        $iptables_path -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-        $iptables_path -t nat -A POSTROUTING -s "$IPV4_RANGE".0/24 -o "$DEFAULT_INTERFACE" -j MASQUERADE
-        if [[ $USE_IPV6 -eq 1 ]]; then
-            $ip6tables_path -A FORWARD -i wg0 -j ACCEPT
-            $ip6tables_path -t nat -A POSTROUTING -s "$IPV6_RANGE"/64 -o "$DEFAULT_INTERFACE" -j MASQUERADE
-        fi
-        prevent_dns_leak
+check_container() {
+    if systemd-detect-virt -cq 2>/dev/null; then
+        exiterr "This system is running inside a container, which is not supported."
     fi
-    echo "net.ipv4.icmp_echo_ignore_all=1" >> /etc/sysctl.conf
-    sysctl -p
 }
 
-prevent_dns_leak() {
-    IFS=', ' read -r -a dns_array <<< "$DNS_SERVER"
-    iptables -A FORWARD -i wg0 -p udp --dport 53 -j DROP
-    for dns in "${dns_array[@]}"; do
-        iptables -A FORWARD -i wg0 -p udp --dport 53 -d "$dns" -j ACCEPT
+set_client_name() {
+    client=$(sed 's/[^0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-]/_/g' <<< "$unsanitized_client" | cut -c-15)
+}
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case $1 in
+            --auto)
+                auto=1
+                shift
+                ;;
+            --addclient)
+                add_client=1
+                unsanitized_client="$2"
+                shift
+                shift
+                ;;
+            --listclients)
+                list_clients=1
+                shift
+                ;;
+            --removeclient)
+                remove_client=1
+                unsanitized_client="$2"
+                shift
+                shift
+                ;;
+            --showclientqr)
+                show_client_qr=1
+                unsanitized_client="$2"
+                shift
+                shift
+                ;;
+            --uninstall)
+                remove_wg=1
+                shift
+                ;;
+            --serveraddr)
+                server_addr="$2"
+                shift
+                shift
+                ;;
+            --port)
+                server_port="$2"
+                shift
+                shift
+                ;;
+            --clientname)
+                first_client_name="$2"
+                shift
+                shift
+                ;;
+            --dns1)
+                dns1="$2"
+                shift
+                shift
+                ;;
+            --dns2)
+                dns2="$2"
+                shift
+                shift
+                ;;
+            -y|--yes)
+                assume_yes=1
+                shift
+                ;;
+            -h|--help)
+                show_usage
+                ;;
+            *)
+                show_usage "Unknown parameter: $1"
+                ;;
+        esac
     done
 }
 
-optimize_sysctl() {
-    cat > /etc/sysctl.d/99-wireguard.conf <<EOF
-net.ipv4.ip_forward=1
-net.ipv6.conf.all.forwarding=1
-net.core.rmem_max=16777216
-net.core.wmem_max=16777216
-net.ipv4.tcp_rmem=4096 87380 16777216
-net.ipv4.tcp_wmem=4096 65536 16777216
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-EOF
-    chmod 600 /etc/sysctl.d/99-wireguard.conf
-    if modprobe tcp_bbr &>/dev/null; then
-        sysctl -p /etc/sysctl.d/99-wireguard.conf
-        msg "success" "تم تفعيل BBR"
-    else
-        sed -i '/net.core.default_qdisc=fq/d' /etc/sysctl.d/99-wireguard.conf
-        sed -i '/net.ipv4.tcp_congestion_control=bbr/d' /etc/sysctl.d/99-wireguard.conf
-        sysctl -p /etc/sysctl.d/99-wireguard.conf
+check_args() {
+    if [ "$auto" != 0 ] && [ -e "$WG_CONF" ]; then
+        show_usage "Invalid parameter '--auto'. WireGuard is already set up on this server."
     fi
+    if [ "$((add_client + list_clients + remove_client + show_client_qr))" -gt 1 ]; then
+        show_usage "Invalid parameters. Specify only one of '--addclient', '--listclients', '--removeclient' or '--showclientqr'."
+    fi
+    if [ "$remove_wg" = 1 ]; then
+        if [ "$((add_client + list_clients + remove_client + show_client_qr + auto))" -gt 0 ]; then
+            show_usage "Invalid parameters. '--uninstall' cannot be specified with other parameters."
+        fi
+    fi
+    if [ ! -e "$WG_CONF" ]; then
+        st_text="You must first set up WireGuard before"
+        [ "$add_client" = 1 ] && exiterr "$st_text adding a client."
+        [ "$list_clients" = 1 ] && exiterr "$st_text listing clients."
+        [ "$remove_client" = 1 ] && exiterr "$st_text removing a client."
+        [ "$show_client_qr" = 1 ] && exiterr "$st_text showing QR code for a client."
+        [ "$remove_wg" = 1 ] && exiterr "Cannot remove WireGuard because it has not been set up on this server."
+    fi
+    if [ "$((add_client + remove_client + show_client_qr))" = 1 ] && [ -n "$first_client_name" ]; then
+        show_usage "Invalid parameters. '--clientname' can only be specified when installing WireGuard."
+    fi
+    if [ -n "$server_addr" ] || [ -n "$server_port" ] || [ -n "$first_client_name" ]; then
+        if [ -e "$WG_CONF" ]; then
+            show_usage "Invalid parameters. WireGuard is already set up on this server."
+        elif [ "$auto" = 0 ]; then
+            show_usage "Invalid parameters. You must specify '--auto' when using these parameters."
+        fi
+    fi
+    if [ "$add_client" = 1 ]; then
+        set_client_name
+        if [ -z "$client" ]; then
+            exiterr "Invalid client name. Use one word only, no special characters except '-' and '_'."
+        elif grep -q "^# BEGIN_PEER $client$" "$WG_CONF"; then
+            exiterr "$client: invalid name. Client already exists."
+        fi
+    fi
+    if [ "$remove_client" = 1 ] || [ "$show_client_qr" = 1 ]; then
+        set_client_name
+        if [ -z "$client" ] || ! grep -q "^# BEGIN_PEER $client$" "$WG_CONF"; then
+            exiterr "Invalid client name, or client does not exist."
+        fi
+    fi
+    if [ -n "$server_addr" ] && { ! check_dns_name "$server_addr" && ! check_ip "$server_addr"; }; then
+        exiterr "Invalid server address. Must be a fully qualified domain name (FQDN) or an IPv4 address."
+    fi
+    if [ -n "$first_client_name" ]; then
+        unsanitized_client="$first_client_name"
+        set_client_name
+        if [ -z "$client" ]; then
+            exiterr "Invalid client name. Use one word only, no special characters except '-' and '_'."
+        fi
+    fi
+    if [ -n "$server_port" ]; then
+        if [[ ! "$server_port" =~ ^[0-9]+$ || "$server_port" -gt 65535 ]]; then
+            exiterr "Invalid port. Must be an integer between 1 and 65535."
+        fi
+    fi
+    if [ -n "$dns1" ]; then
+        if [ -e "$WG_CONF" ] && [ "$add_client" = 0 ]; then
+            show_usage "Invalid parameters. Custom DNS server(s) can only be specified when installing WireGuard or adding a client."
+        fi
+    fi
+    if { [ -n "$dns1" ] && ! check_ip "$dns1"; } || { [ -n "$dns2" ] && ! check_ip "$dns2"; }; then
+        exiterr "Invalid DNS server(s)."
+    fi
+    if [ -z "$dns1" ] && [ -n "$dns2" ]; then
+        show_usage "Invalid DNS server. --dns2 cannot be specified without --dns1."
+    fi
+    if [ -n "$dns1" ] && [ -n "$dns2" ]; then
+        dns="$dns1, $dns2"
+    elif [ -n "$dns1" ]; then
+        dns="$dns1"
+    else
+        dns="8.8.8.8, 8.8.4.4"  # Default DNS
+    fi
+}
+
+check_nftables() {
+    if [ "$os" = "centos" ]; then
+        if grep -qs "hwdsl2 VPN script" /etc/sysconfig/nftables.conf || systemctl is-active --quiet nftables 2>/dev/null; then
+            exiterr "This system has nftables enabled, which is not supported by this installer."
+        fi
+    fi
+}
+
+install_wget() {
+    if ! hash wget 2>/dev/null && ! hash curl 2>/dev/null; then
+        if [ "$auto" = 0 ]; then
+            echo "Wget is required to use this installer."
+            read -n1 -r -p "Press any key to install Wget and continue..."
+        fi
+        export DEBIAN_FRONTEND=noninteractive
+        (
+            set -x
+            apt-get -yqq update || apt-get -yqq update
+            apt-get -yqq install wget >/dev/null
+        ) || exiterr2
+    fi
+}
+
+install_iproute() {
+    if ! hash ip 2>/dev/null; then
+        if [ "$auto" = 0 ]; then
+            echo "iproute is required to use this installer."
+            read -n1 -r -p "Press any key to install iproute and continue..."
+        fi
+        if [ "$os" = "debian" ] || [ "$os" = "ubuntu" ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            (
+                set -x
+                apt-get -yqq update || apt-get -yqq update
+                apt-get -yqq install iproute2 >/dev/null
+            ) || exiterr2
+        elif [ "$os" = "openSUSE" ]; then
+            (
+                set -x
+                zypper install iproute2 >/dev/null
+            ) || exiterr4
+        else
+            (
+                set -x
+                yum -y -q install iproute >/dev/null
+            ) || exiterr3
+        fi
+    fi
+}
+
+show_header() {
+    cat <<'EOF'
+
+WireGuard Script
+https://github.com/hwdsl2/wireguard-install
+EOF
+}
+
+show_header2() {
+    cat <<'EOF'
+
+Welcome to this WireGuard server installer!
+GitHub: https://github.com/hwdsl2/wireguard-install
+
+EOF
+}
+
+show_header3() {
+    cat <<'EOF'
+
+Copyright (c) 2022-2024 Lin Song
+Copyright (c) 2020-2023 Nyr
+EOF
+}
+
+show_usage() {
+    if [ -n "$1" ]; then
+        echo -e "${RED}Error: $1${NC}" >&2
+    fi
+    show_header
+    show_header3
+    cat 1>&2 <<EOF
+
+Usage: bash $0 [options]
+
+Options:
+
+  --addclient [client name]      add a new client
+  --dns1 [DNS server IP]         primary DNS server for new client (optional, default: Google Public DNS)
+  --dns2 [DNS server IP]         secondary DNS server for new client (optional)
+  --listclients                  list the names of existing clients
+  --removeclient [client name]   remove an existing client
+  --showclientqr [client name]   show QR code for an existing client
+  --uninstall                    remove WireGuard and delete all configuration
+  -y, --yes                      assume "yes" as answer to prompts when removing a client or removing WireGuard
+  -h, --help                     show this help message and exit
+
+Install options (optional):
+
+  --auto                         auto install WireGuard using default or custom options
+  --serveraddr [DNS name or IP]  server address, must be a fully qualified domain name (FQDN) or an IPv4 address
+  --port [number]                port for WireGuard (1-65535, default: 51820)
+  --clientname [client name]     name for the first WireGuard client (default: client)
+  --dns1 [DNS server IP]         primary DNS server for first client (default: Google Public DNS)
+  --dns2 [DNS server IP]         secondary DNS server for first client
+
+To customize options, you may also run this script without arguments.
+EOF
+    exit 1
+}
+
+show_welcome() {
+    if [ "$auto" = 0 ]; then
+        show_header2
+        echo 'I need to ask you a few questions before starting setup.'
+        echo 'You can use the default options and just press enter if you are OK with them.'
+    else
+        show_header
+        op_text=default
+        if [ -n "$server_addr" ] || [ -n "$server_port" ] || [ -n "$first_client_name" ] || [ -n "$dns1" ]; then
+            op_text=custom
+        fi
+        echo
+        echo -e "${BLUE}Starting WireGuard setup using $op_text options.${NC}"
+    fi
+}
+
+show_dns_name_note() {
+    cat <<EOF
+
+${YELLOW}Note: Make sure this DNS name '$1'
+      resolves to the IPv4 address of this server.${NC}
+EOF
+}
+
+enter_server_address() {
+    echo
+    echo "Do you want WireGuard VPN clients to connect to this server using a DNS name,"
+    printf "e.g. vpn.example.com, instead of its IP address? [y/N] "
+    read -r response
+    case $response in
+        [yY][eE][sS]|[yY])
+            use_dns_name=1
+            echo
+            ;;
+        *)
+            use_dns_name=0
+            ;;
+    esac
+    if [ "$use_dns_name" = 1 ]; then
+        read -rp "Enter the DNS name of this VPN server: " server_addr_i
+        until check_dns_name "$server_addr_i"; do
+            echo "Invalid DNS name. You must enter a fully qualified domain name (FQDN)."
+            read -rp "Enter the DNS name of this VPN server: " server_addr_i
+        done
+        ip="$server_addr_i"
+        show_dns_name_note "$ip"
+    else
+        detect_ip
+        check_nat_ip
+    fi
+}
+
+find_public_ip() {
+    ip_url1="http://ipv4.icanhazip.com"
+    ip_url2="http://ip1.dynupdate.no-ip.com"
+    get_public_ip=$(grep -m 1 -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' <<< "$(wget -T 10 -t 1 -4qO- "$ip_url1" || curl -m 10 -4Ls "$ip_url1")")
+    if ! check_ip "$get_public_ip"; then
+        get_public_ip=$(grep -m 1 -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' <<< "$(wget -T 10 -t 1 -4qO- "$ip_url2" || curl -m 10 -4Ls "$ip_url2")")
+    fi
+}
+
+detect_ip() {
+    if [[ $(ip -4 addr | grep inet | grep -vEc '127(\.[0-9]{1,3}){3}') -eq 1 ]]; then
+        ip=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}')
+    else
+        ip=$(ip -4 route get 1 | sed 's/ uid .*//' | awk '{print $NF;exit}' 2>/dev/null)
+        if ! check_ip "$ip"; then
+            find_public_ip
+            ip_match=0
+            if [ -n "$get_public_ip" ]; then
+                ip_list=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}')
+                while IFS= read -r line; do
+                    if [ "$line" = "$get_public_ip" ]; then
+                        ip_match=1
+                        ip="$line"
+                    fi
+                done <<< "$ip_list"
+            fi
+            if [ "$ip_match" = 0 ]; then
+                if [ "$auto" = 0 ]; then
+                    echo
+                    echo "Which IPv4 address should be used?"
+                    num_of_ip=$(ip -4 addr | grep inet | grep -vEc '127(\.[0-9]{1,3}){3}')
+                    ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | nl -s ') '
+                    read -rp "IPv4 address [1]: " ip_num
+                    until [[ -z "$ip_num" || "$ip_num" =~ ^[0-9]+$ && "$ip_num" -le "$num_of_ip" ]]; do
+                        echo "$ip_num: invalid selection."
+                        read -rp "IPv4 address [1]: " ip_num
+                    done
+                    [[ -z "$ip_num" ]] && ip_num=1
+                else
+                    ip_num=1
+                fi
+                ip=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | sed -n "$ip_num"p)
+            fi
+        fi
+    fi
+    if ! check_ip "$ip"; then
+        echo "Error: Could not detect this server's IP address." >&2
+        echo "Abort. No changes were made." >&2
+        exit 1
+    fi
+}
+
+check_nat_ip() {
+    if check_pvt_ip "$ip"; then
+        find_public_ip
+        if ! check_ip "$get_public_ip"; then
+            if [ "$auto" = 0 ]; then
+                echo
+                echo "This server is behind NAT. What is the public IPv4 address?"
+                read -rp "Public IPv4 address: " public_ip
+                until check_ip "$public_ip"; do
+                    echo "Invalid input."
+                    read -rp "Public IPv4 address: " public_ip
+                done
+            else
+                echo "Error: Could not detect this server's public IP." >&2
+                echo "Abort. No changes were made." >&2
+                exit 1
+            fi
+        else
+            public_ip="$get_public_ip"
+        fi
+    fi
+}
+
+show_config() {
+    if [ "$auto" != 0 ]; then
+        echo
+        if [ -n "$server_addr" ]; then
+            echo "Server address: $server_addr"
+        else
+            printf '%s' "Server IP: "
+            [ -n "$public_ip" ] && printf '%s\n' "$public_ip" || printf '%s\n' "$ip"
+        fi
+        [ -n "$server_port" ] && port_text="$server_port" || port_text=51820
+        [ -n "$first_client_name" ] && client_text="$client" || client_text=client
+        if [ -n "$dns1" ] && [ -n "$dns2" ]; then
+            dns_text="$dns1, $dns2"
+        elif [ -n "$dns1" ]; then
+            dns_text="$dns1"
+        else
+            dns_text="Google Public DNS"
+        fi
+        echo "Port: UDP/$port_text"
+        echo "Client name: $client_text"
+        echo "Client DNS: $dns_text"
+    fi
+}
+
+detect_ipv6() {
+    ip6=""
+    if [[ $(ip -6 addr | grep -c 'inet6 [23]') -ne 0 ]]; then
+        ip6=$(ip -6 addr | grep 'inet6 [23]' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | sed -n 1p)
+    fi
+}
+
+select_port() {
+    if [ "$auto" = 0 ]; then
+        echo
+        echo "Which port should WireGuard listen to?"
+        read -rp "Port [51820]: " port
+        until [[ -z "$port" || "$port" =~ ^[0-9]+$ && "$port" -le 65535 ]]; do
+            echo "$port: invalid port."
+            read -rp "Port [51820]: " port
+        done
+        [[ -z "$port" ]] && port=51820
+    else
+        [ -n "$server_port" ] && port="$server_port" || port=51820
+    fi
+}
+
+enter_custom_dns() {
+    read -rp "Enter primary DNS server: " dns1
+    until check_ip "$dns1"; do
+        echo "Invalid DNS server."
+        read -rp "Enter primary DNS server: " dns1
+    done
+    read -rp "Enter secondary DNS server (Enter to skip): " dns2
+    until [ -z "$dns2" ] || check_ip "$dns2"; do
+        echo "Invalid DNS server."
+        read -rp "Enter secondary DNS server (Enter to skip): " dns2
+    done
 }
 
 select_dns() {
-    echo "اختر خادم DNS:"
-    echo "  1) Google (8.8.8.8, 8.8.4.4)"
-    echo "  2) Cloudflare (1.1.1.1, 1.0.0.1)"
-    echo "  3) OpenDNS (208.67.222.222, 208.67.220.220)"
-    echo "  4) AdGuard (94.140.14.14, 94.140.15.15)"
-    echo "  5) Quad9 (9.9.9.9, 149.112.112.112)"
-    echo "  6) NextDNS (45.90.28.0, 45.90.30.0)"
-    echo "  7) CleanBrowsing (185.228.168.168, 185.228.169.168)"
-    echo "  8) مخصص"
-    read -p "اختيارك [1]: " dns_choice
-    case $dns_choice in
-        1|"") DNS_SERVER="8.8.8.8, 8.8.4.4" ;;
-        2) DNS_SERVER="1.1.1.1, 1.0.0.1" ;;
-        3) DNS_SERVER="208.67.222.222, 208.67.220.220" ;;
-        4) DNS_SERVER="94.140.14.14, 94.140.15.15" ;;
-        5) DNS_SERVER="9.9.9.9, 149.112.112.112" ;;
-        6) DNS_SERVER="45.90.28.0, 45.90.30.0" ;;
-        7) DNS_SERVER="185.228.168.168, 185.228.169.168" ;;
-        8) read -p "أدخل DNS (مثال: 8.8.8.8 أو 8.8.8.8, 8.8.4.4): " DNS_SERVER ;;
-        *) DNS_SERVER="8.8.8.8, 8.8.4.4" ;;
+    if [ "$auto" = 0 ] || [ "$add_client" = 1 ]; then
+        echo
+        echo "Select a DNS server for the client:"
+        echo "   1) Current system resolvers"
+        echo "   2) Google Public DNS (8.8.8.8, 8.8.4.4)"
+        echo "   3) Cloudflare DNS (1.1.1.1, 1.0.0.1)"
+        echo "   4) OpenDNS (208.67.222.222, 208.67.220.220)"
+        echo "   5) Quad9 (9.9.9.9, 149.112.112.112)"
+        echo "   6) AdGuard DNS (94.140.14.14, 94.140.15.15)"
+        echo "   7) NextDNS (45.90.28.0, 45.90.30.0)"
+        echo "   8) CleanBrowsing (185.228.168.168, 185.228.169.168)"
+        echo "   9) Custom"
+        read -rp "DNS server [2]: " dns_choice
+        until [[ -z "$dns_choice" || "$dns_choice" =~ ^[1-9]$ ]]; do
+            echo "$dns_choice: invalid selection."
+            read -rp "DNS server [2]: " dns_choice
+        done
+    else
+        dns_choice=2  # Default for auto mode without prompt
+    fi
+    case "$dns_choice" in
+        1)
+            if grep '^nameserver' "/etc/resolv.conf" | grep -qv '127.0.0.53'; then
+                resolv_conf="/etc/resolv.conf"
+            else
+                resolv_conf="/run/systemd/resolve/resolv.conf"
+            fi
+            dns=$(grep -v '^#\|^;' "$resolv_conf" | grep '^nameserver' | grep -v '127.0.0.53' | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | xargs | sed -e 's/ /, /g')
+            ;;
+        2|"")
+            dns="8.8.8.8, 8.8.4.4"
+            ;;
+        3)
+            dns="1.1.1.1, 1.0.0.1"
+            ;;
+        4)
+            dns="208.67.222.222, 208.67.220.220"
+            ;;
+        5)
+            dns="9.9.9.9, 149.112.112.112"
+            ;;
+        6)
+            dns="94.140.14.14, 94.140.15.15"
+            ;;
+        7)
+            dns="45.90.28.0, 45.90.30.0"
+            ;;
+        8)
+            dns="185.228.168.168, 185.228.169.168"
+            ;;
+        9)
+            enter_custom_dns
+            if [ -n "$dns2" ]; then
+                dns="$dns1, $dns2"
+            else
+                dns="$dns1"
+            fi
+            ;;
     esac
 }
 
-setup_server() {
-    if [[ $DEFAULT_MODE ]]; then
-        WG_PORT=51820
-        MTU=1420
-        USE_IPV6=1
-        DNS_SERVER="8.8.8.8, 8.8.4.4"  # افتراضي للوضع الافتراضي
+enter_first_client_name() {
+    if [ "$auto" = 0 ]; then
+        echo
+        echo "Enter a name for the first client:"
+        read -rp "Name [client]: " unsanitized_client
+        set_client_name
+        [[ -z "$client" ]] && client=client
     else
-        read -p "أدخل المنفذ [$WG_PORT]: " port
-        WG_PORT=${port:-$WG_PORT}
-        read -p "أدخل MTU [$MTU]: " mtu_input
-        MTU=${mtu_input:-$MTU}
-        read -p "هل تريد تفعيل IPv6؟ (y/n) [y]: " ipv6_input
-        case $ipv6_input in
-            n|N) USE_IPV6=0 ;;
-            *) USE_IPV6=1 ;;
-        esac
-        select_dns  # استدعاء اختيار DNS في الوضع الاختياري
+        if [ -n "$first_client_name" ]; then
+            unsanitized_client="$first_client_name"
+            set_client_name
+        else
+            client=client
+        fi
     fi
-    detect_interface
+}
+
+show_setup_ready() {
+    if [ "$auto" = 0 ]; then
+        echo
+        echo "WireGuard installation is ready to begin."
+    fi
+}
+
+check_firewall() {
+    if ! systemctl is-active --quiet firewalld.service && ! hash iptables 2>/dev/null; then
+        if [[ "$os" == "centos" || "$os" == "fedora" ]]; then
+            firewall="firewalld"
+        elif [[ "$os" == "openSUSE" ]]; then
+            firewall="firewalld"
+        elif [[ "$os" == "debian" || "$os" == "ubuntu" ]]; then
+            firewall="iptables"
+        fi
+        if [[ "$firewall" == "firewalld" ]]; then
+            echo
+            echo "Note: firewalld will be installed and enabled during setup."
+        fi
+    fi
+}
+
+abort_and_exit() {
+    echo "Abort. No changes were made." >&2
+    exit 1
+}
+
+confirm_setup() {
+    if [ "$auto" = 0 ]; then
+        printf "Do you want to continue? [Y/n] "
+        read -r response
+        case $response in
+            [yY][eE][sS]|[yY]|'')
+                ;;
+            *)
+                abort_and_exit
+                ;;
+        esac
+    fi
+}
+
+show_start_setup() {
+    echo
+    echo "Installing WireGuard, please wait..."
+}
+
+install_pkgs() {
+    if [[ "$os" == "ubuntu" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+        (
+            set -x
+            apt-get -yqq update || apt-get -yqq update
+            apt-get -yqq install wireguard qrencode $firewall >/dev/null
+        ) || exiterr2
+    elif [[ "$os" == "debian" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+        (
+            set -x
+            apt-get -yqq update || apt-get -yqq update
+            apt-get -yqq install wireguard qrencode $firewall >/dev/null
+        ) || exiterr2
+    elif [[ "$os" == "centos" && "$os_version" -eq 9 ]]; then
+        (
+            set -x
+            yum -y -q install epel-release >/dev/null
+            yum -y -q install wireguard-tools qrencode $firewall >/dev/null 2>&1
+        ) || exiterr3
+        mkdir -p /etc/wireguard/
+    elif [[ "$os" == "centos" && "$os_version" -eq 8 ]]; then
+        (
+            set -x
+            yum -y -q install epel-release elrepo-release >/dev/null
+            yum -y -q --nobest install kmod-wireguard >/dev/null 2>&1
+            yum -y -q install wireguard-tools qrencode $firewall >/dev/null 2>&1
+        ) || exiterr3
+        mkdir -p /etc/wireguard/
+    elif [[ "$os" == "fedora" ]]; then
+        (
+            set -x
+            dnf install -y wireguard-tools qrencode $firewall >/dev/null
+        ) || exiterr "'dnf install' failed."
+        mkdir -p /etc/wireguard/
+    elif [[ "$os" == "openSUSE" ]]; then
+        (
+            set -x
+            zypper install -y wireguard-tools qrencode $firewall >/dev/null
+        ) || exiterr4
+        mkdir -p /etc/wireguard/
+    fi
+    [ ! -d /etc/wireguard ] && exiterr2
+    if [[ "$firewall" == "firewalld" ]]; then
+        (
+            set -x
+            systemctl enable --now firewalld.service >/dev/null 2>&1
+        )
+    fi
+}
+
+remove_pkgs() {
+    if [[ "$os" == "ubuntu" ]]; then
+        (
+            set -x
+            rm -rf /etc/wireguard/
+            apt-get remove --purge -y wireguard wireguard-tools >/dev/null
+        )
+    elif [[ "$os" == "debian" ]]; then
+        (
+            set -x
+            rm -rf /etc/wireguard/
+            apt-get remove --purge -y wireguard wireguard-tools >/dev/null
+        )
+    elif [[ "$os" == "centos" && "$os_version" -eq 9 ]]; then
+        (
+            set -x
+            yum -y -q remove wireguard-tools >/dev/null
+            rm -rf /etc/wireguard/
+        )
+    elif [[ "$os" == "centos" && "$os_version" -le 8 ]]; then
+        (
+            set -x
+            yum -y -q remove kmod-wireguard wireguard-tools >/dev/null
+            rm -rf /etc/wireguard/
+        )
+    elif [[ "$os" == "fedora" ]]; then
+        (
+            set -x
+            dnf remove -y wireguard-tools >/dev/null
+            rm -rf /etc/wireguard/
+        )
+    elif [[ "$os" == "openSUSE" ]]; then
+        (
+            set -x
+            zypper remove -y wireguard-tools >/dev/null
+            rm -rf /etc/wireguard/
+        )
+    fi
+}
+
+create_server_config() {
     TEMP_KEY=$(mktemp)
     wg genkey > "$TEMP_KEY"
     SERVER_PRIVATE=$(cat "$TEMP_KEY")
@@ -200,242 +767,632 @@ setup_server() {
     SERVER_PUBLIC=$(cat /etc/wireguard/server.pub)
     mv "$TEMP_KEY" /etc/wireguard/server.key
     chmod 600 /etc/wireguard/server.key /etc/wireguard/server.pub
-    if [[ $USE_IPV6 -eq 1 ]]; then
-        IPV6_ADDRESS="${IPV6_RANGE}1/64"
-    else
-        IPV6_ADDRESS=""
-    fi
-    TEMP_CONFIG=$(mktemp)
-    cat > "$TEMP_CONFIG" <<EOF
+    cat << EOF > "$WG_CONF"
+# ENDPOINT $([[ -n "$public_ip" ]] && echo "$public_ip" || echo "$ip")
 [Interface]
+Address = 10.7.0.1/24$([[ -n "$ip6" ]] && echo ", fddd:2c4:2c4:2c4::1/64")
 PrivateKey = $SERVER_PRIVATE
-Address = $IPV4_RANGE.1/24${IPV6_ADDRESS:+, $IPV6_ADDRESS}
-ListenPort = $WG_PORT
-MTU = $MTU
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
+ListenPort = $port
 EOF
-    chmod 600 "$TEMP_CONFIG"
-    mv "$TEMP_CONFIG" "$WG_CONFIG"
+    chmod 600 "$WG_CONF"
 }
 
-add_client() {
-    local client_name=${1:-$CLIENT_NAME}
-    if [[ $DEFAULT_MODE ]]; then
-        client_name="client_$((RANDOM % 1000))"
-        client_ip="$IPV4_RANGE.2"
+create_firewall_rules() {
+    if systemctl is-active --quiet firewalld.service; then
+        firewall-cmd -q --add-port="$port"/udp
+        firewall-cmd -q --zone=trusted --add-source=10.7.0.0/24
+        firewall-cmd -q --permanent --add-port="$port"/udp
+        firewall-cmd -q --permanent --zone=trusted --add-source=10.7.0.0/24
+        firewall-cmd -q --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j MASQUERADE
+        firewall-cmd -q --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j MASQUERADE
+        if [[ -n "$ip6" ]]; then
+            firewall-cmd -q --zone=trusted --add-source=fddd:2c4:2c4:2c4::/64
+            firewall-cmd -q --permanent --zone=trusted --add-source=fddd:2c4:2c4:2c4::/64
+            firewall-cmd -q --direct --add-rule ipv6 nat POSTROUTING 0 -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j MASQUERADE
+            firewall-cmd -q --permanent --direct --add-rule ipv6 nat POSTROUTING 0 -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j MASQUERADE
+        fi
     else
-        read -p "اسم العميل [$client_name]: " input_name
-        client_name=${input_name:-$client_name}
-        [[ ! "$client_name" =~ ^[a-zA-Z0-9_-]+$ ]] && msg "error" "اسم العميل يجب أن يحتوي فقط على أحرف، أرقام، -، أو _"
-        read -p "عنوان IP (مثال: $IPV4_RANGE.2): " client_ip
+        iptables_path=$(command -v iptables)
+        ip6tables_path=$(command -v ip6tables)
+        if [[ $(systemd-detect-virt) == "openvz" ]] && readlink -f "$(command -v iptables)" | grep -q "nft" && hash iptables-legacy 2>/dev/null; then
+            iptables_path=$(command -v iptables-legacy)
+            ip6tables_path=$(command -v ip6tables-legacy)
+        fi
+        echo "[Unit]
+Before=network.target
+[Service]
+Type=oneshot
+ExecStart=$iptables_path -t nat -A POSTROUTING -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j MASQUERADE
+ExecStart=$iptables_path -I INPUT -p udp --dport $port -j ACCEPT
+ExecStart=$iptables_path -I FORWARD -s 10.7.0.0/24 -j ACCEPT
+ExecStart=$iptables_path -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+ExecStop=$iptables_path -t nat -D POSTROUTING -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j MASQUERADE
+ExecStop=$iptables_path -D INPUT -p udp --dport $port -j ACCEPT
+ExecStop=$iptables_path -D FORWARD -s 10.7.0.0/24 -j ACCEPT
+ExecStop=$iptables_path -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" > /etc/systemd/system/wg-iptables.service
+        if [[ -n "$ip6" ]]; then
+            echo "ExecStart=$ip6tables_path -t nat -A POSTROUTING -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j MASQUERADE
+ExecStart=$ip6tables_path -I FORWARD -s fddd:2c4:2c4:2c4::/64 -j ACCEPT
+ExecStart=$ip6tables_path -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+ExecStop=$ip6tables_path -t nat -D POSTROUTING -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j MASQUERADE
+ExecStop=$ip6tables_path -D FORWARD -s fddd:2c4:2c4:2c4::/64 -j ACCEPT
+ExecStop=$ip6tables_path -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" >> /etc/systemd/system/wg-iptables.service
+        fi
+        echo "RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target" >> /etc/systemd/system/wg-iptables.service
+        (
+            set -x
+            systemctl enable --now wg-iptables.service >/dev/null 2>&1
+        )
     fi
-    if grep -q "AllowedIPs = $client_ip" "$WG_CONFIG"; then
-        msg "error" "العنوان $client_ip مستخدم"
-        return
+}
+
+remove_firewall_rules() {
+    port=$(grep '^ListenPort' "$WG_CONF" | cut -d " " -f 3)
+    if systemctl is-active --quiet firewalld.service; then
+        ip=$(firewall-cmd --direct --get-rules ipv4 nat POSTROUTING | grep '\-s 10.7.0.0/24 '"'"'!'"'"' -d 10.7.0.0/24' | grep -oE '[^ ]+$')
+        firewall-cmd -q --remove-port="$port"/udp
+        firewall-cmd -q --zone=trusted --remove-source=10.7.0.0/24
+        firewall-cmd -q --permanent --remove-port="$port"/udp
+        firewall-cmd -q --permanent --zone=trusted --remove-source=10.7.0.0/24
+        firewall-cmd -q --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j MASQUERADE
+        firewall-cmd -q --permanent --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j MASQUERADE
+        if grep -qs 'fddd:2c4:2c4:2c4::1/64' "$WG_CONF"; then
+            ip6=$(firewall-cmd --direct --get-rules ipv6 nat POSTROUTING | grep '\-s fddd:2c4:2c4:2c4::/64 '"'"'!'"'"' -d fddd:2c4:2c4:2c4::/64' | grep -oE '[^ ]+$')
+            firewall-cmd -q --zone=trusted --remove-source=fddd:2c4:2c4:2c4::/64
+            firewall-cmd -q --permanent --zone=trusted --remove-source=fddd:2c4:2c4:2c4::/64
+            firewall-cmd -q --direct --remove-rule ipv6 nat POSTROUTING 0 -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j MASQUERADE
+            firewall-cmd -q --permanent --direct --remove-rule ipv6 nat POSTROUTING 0 -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j MASQUERADE
+        fi
+    else
+        systemctl disable --now wg-iptables.service
+        rm -f /etc/systemd/system/wg-iptables.service
+    fi
+}
+
+get_export_dir() {
+    export_to_home_dir=0
+    export_dir=~/
+    if [ -n "$SUDO_USER" ] && getent group "$SUDO_USER" >/dev/null 2>&1; then
+        user_home_dir=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)
+        if [ -d "$user_home_dir" ] && [ "$user_home_dir" != "/" ]; then
+            export_dir="$user_home_dir/"
+            export_to_home_dir=1
+        fi
+    fi
+}
+
+select_client_ip() {
+    octet=2
+    while grep AllowedIPs "$WG_CONF" | cut -d "." -f 4 | cut -d "/" -f 1 | grep -q "^$octet$"; do
+        (( octet++ ))
+    done
+    if [[ "$octet" -eq 255 ]]; then
+        exiterr "253 clients are already configured. The WireGuard internal subnet is full!"
+    fi
+}
+
+new_client() {
+    select_client_ip
+    spec_ip=n
+    if [ "$1" = "add_client" ] && [ "$add_client" = 0 ]; then
+        echo
+        read -rp "Do you want to specify an internal IP address for the new client? [y/N]: " spec_ip
+        until [[ "$spec_ip" =~ ^[yYnN]*$ ]]; do
+            echo "$spec_ip: invalid selection."
+            read -rp "Do you want to specify an internal IP address for the new client? [y/N]: " spec_ip
+        done
+        if [[ ! "$spec_ip" =~ ^[yY]$ ]]; then
+            echo "Using auto assigned IP address 10.7.0.$octet."
+        fi
+    fi
+    if [[ "$spec_ip" =~ ^[yY]$ ]]; then
+        echo
+        read -rp "Enter IP address for the new client (e.g. 10.7.0.X): " client_ip
+        octet=$(printf '%s' "$client_ip" | cut -d "." -f 4)
+        until [[ $client_ip =~ ^10\.7\.0\.([2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])$ ]] && ! grep AllowedIPs "$WG_CONF" | cut -d "." -f 4 | cut -d "/" -f 1 | grep -q "^$octet$"; do
+            if [[ ! $client_ip =~ ^10\.7\.0\.([2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])$ ]]; then
+                echo "Invalid IP address. Must be within the range 10.7.0.2 to 10.7.0.254."
+            else
+                echo "The IP address is already in use. Please choose another one."
+            fi
+            read -rp "Enter IP address for the new client (e.g. 10.7.0.X): " client_ip
+            octet=$(printf '%s' "$client_ip" | cut -d "." -f 4)
+        done
     fi
     TEMP_KEY=$(mktemp)
-    TEMP_PUB=$(mktemp)
     TEMP_PSK=$(mktemp)
     wg genkey > "$TEMP_KEY"
-    cat "$TEMP_KEY" | wg pubkey > "$TEMP_PUB"
     wg genpsk > "$TEMP_PSK"
     CLIENT_PRIVATE=$(cat "$TEMP_KEY")
-    CLIENT_PUBLIC=$(cat "$TEMP_PUB")
     CLIENT_PSK=$(cat "$TEMP_PSK")
-    mv "$TEMP_KEY" "$CLIENT_DIR/$client_name.key"
-    mv "$TEMP_PUB" "$CLIENT_DIR/$client_name.pub"
-    mv "$TEMP_PSK" "$CLIENT_DIR/$client_name.psk"
-    chmod 600 "$CLIENT_DIR/$client_name.key" "$CLIENT_DIR/$client_name.pub" "$CLIENT_DIR/$client_name.psk"
-    if [[ $USE_IPV6 -eq 1 ]]; then
-        CLIENT_IPV6="${IPV6_RANGE}$((RANDOM % 1000 + 2))/128"
-        CLIENT_IPV6_SUBNET="${IPV6_RANGE}$((RANDOM % 1000 + 2))/64"
-    else
-        CLIENT_IPV6=""
-        CLIENT_IPV6_SUBNET=""
-    fi
-    echo -e "\n# $client_name" >> "$WG_CONFIG"
-    echo "[Peer]" >> "$WG_CONFIG"
-    echo "PublicKey = $CLIENT_PUBLIC" >> "$WG_CONFIG"
-    echo "PresharedKey = $CLIENT_PSK" >> "$WG_CONFIG"
-    echo "AllowedIPs = $client_ip/32${CLIENT_IPV6:+, $CLIENT_IPV6}" >> "$WG_CONFIG"
-    if [[ $DEFAULT_MODE ]]; then
-        KEEPALIVE=25
-    else
-        read -p "PersistentKeepalive [$KEEPALIVE]: " keepalive
-        KEEPALIVE=${keepalive:-$KEEPALIVE}
-    fi
-    SERVER_PUBLIC=$(cat /etc/wireguard/server.pub)
-    TEMP_CLIENT=$(mktemp)
-    cat > "$TEMP_CLIENT" <<EOF
+    echo "$CLIENT_PRIVATE" | wg pubkey > "$export_dir$client.pub"
+    CLIENT_PUBLIC=$(cat "$export_dir$client.pub")
+    mv "$TEMP_KEY" "$export_dir$client.key"
+    mv "$TEMP_PSK" "$export_dir$client.psk"
+    chmod 600 "$export_dir$client.key" "$export_dir$client.pub" "$export_dir$client.psk"
+    cat << EOF >> "$WG_CONF"
+# BEGIN_PEER $client
+[Peer]
+PublicKey = $CLIENT_PUBLIC
+PresharedKey = $CLIENT_PSK
+AllowedIPs = 10.7.0.$octet/32$([[ -n "$ip6" ]] && echo ", fddd:2c4:2c4:2c4::$octet/128")
+# END_PEER $client
+EOF
+    get_export_dir
+    cat << EOF > "$export_dir$client.conf"
 [Interface]
+Address = 10.7.0.$octet/24$([[ -n "$ip6" ]] && echo ", fddd:2c4:2c4:2c4::$octet/64")
+DNS = $dns
 PrivateKey = $CLIENT_PRIVATE
-Address = $client_ip/24${CLIENT_IPV6_SUBNET:+, $CLIENT_IPV6_SUBNET}
-DNS = $DNS_SERVER
-MTU = $MTU
 
 [Peer]
 PublicKey = $SERVER_PUBLIC
 PresharedKey = $CLIENT_PSK
-Endpoint = $PUBLIC_IP:$WG_PORT
-AllowedIPs = 0.0.0.0/0${USE_IPV6:+, ::/0}
-PersistentKeepalive = $KEEPALIVE
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = $([[ -n "$public_ip" ]] && echo "$public_ip" || echo "$ip"):$port
+PersistentKeepalive = 25
 EOF
-    chmod 600 "$TEMP_CLIENT"
-    mv "$TEMP_CLIENT" "$CLIENT_DIR/$client_name.conf"
-    systemctl restart wg-quick@wg0
-    if ! systemctl is-active wg-quick@wg0 >/dev/null; then
-        msg "error" "فشل تشغيل الخدمة\n$(systemctl status wg-quick@wg0.service)"
+    if [ "$export_to_home_dir" = 1 ]; then
+        chown "$SUDO_USER:$SUDO_USER" "$export_dir$client.conf" "$export_dir$client.key" "$export_dir$client.pub" "$export_dir$client.psk"
     fi
-    qrencode -t ansiutf8 < "$CLIENT_DIR/$client_name.conf"
-    msg "success" "تم إضافة $client_name، التكوين في $CLIENT_DIR/$client_name.conf"
+    chmod 600 "$export_dir$client.conf"
 }
 
-list_clients() {
-    grep '^# ' "$WG_CONFIG" | cut -d ' ' -f 2 | nl -s ') '
+update_sysctl() {
+    mkdir -p /etc/sysctl.d
+    conf_fwd="/etc/sysctl.d/99-wireguard-forward.conf"
+    echo 'net.ipv4.ip_forward=1' > "$conf_fwd"
+    if [[ -n "$ip6" ]]; then
+        echo "net.ipv6.conf.all.forwarding=1" >> "$conf_fwd"
+    fi
+    sysctl -e -q -p "$conf_fwd"
 }
 
-remove_client() {
-    list_clients
-    read -p "اختر العميل للحذف (رقم): " num
-    client=$(grep '^# ' "$WG_CONFIG" | cut -d ' ' -f 2 | sed -n "${num}p")
-    [[ -z "$client" ]] && msg "error" "اختيار غير صالح"
-    sed -i "/^# $client$/,/^AllowedIPs/d" "$WG_CONFIG"
-    rm -f "$CLIENT_DIR/$client.conf" "$CLIENT_DIR/$client.key" "$CLIENT_DIR/$client.pub" "$CLIENT_DIR/$client.psk"
-    systemctl restart wg-quick@wg0
-    msg "success" "تم حذف $client"
+update_rclocal() {
+    ipt_cmd="systemctl restart wg-iptables.service"
+    if ! grep -qs "$ipt_cmd" /etc/rc.local; then
+        if [ ! -f /etc/rc.local ]; then
+            echo '#!/bin/sh' > /etc/rc.local
+        else
+            if [ "$os" = "ubuntu" ] || [ "$os" = "debian" ]; then
+                sed --follow-symlinks -i '/^exit 0/d' /etc/rc.local
+            fi
+        fi
+        cat >> /etc/rc.local <<EOF
+
+$ipt_cmd
+EOF
+        if [ "$os" = "ubuntu" ] || [ "$os" = "debian" ]; then
+            echo "exit 0" >> /etc/rc.local
+        fi
+        chmod +x /etc/rc.local
+    fi
 }
 
-remove_wireguard() {
-    systemctl stop wg-quick@wg0
-    systemctl disable wg-quick@wg0
-    rm -rf /etc/wireguard "$CLIENT_DIR" /etc/sysctl.d/99-wireguard.conf
-    if command -v firewall-cmd &>/dev/null; then
-        firewall-cmd --permanent --remove-port="$WG_PORT"/udp
-        firewall-cmd --permanent --zone=trusted --remove-source="$IPV4_RANGE".0/24
-        [[ $USE_IPV6 -eq 1 ]] && firewall-cmd --permanent --zone=trusted --remove-source="$IPV6_RANGE"/64
-        firewall-cmd --reload
+start_wg_service() {
+    (
+        set -x
+        systemctl enable --now wg-quick@wg0.service >/dev/null 2>&1
+    )
+}
+
+show_client_qr_code() {
+    qrencode -t UTF8 < "$export_dir$client.conf"
+    echo -e "${BLUE}That is a QR code containing the client configuration.${NC}"
+}
+
+finish_setup() {
+    echo
+    if ! modprobe -nq wireguard; then
+        echo -e "${YELLOW}Warning!${NC}"
+        echo "Installation was finished, but the WireGuard kernel module could not load."
+        echo "Reboot the system to load the most recent kernel."
     else
-        iptables -D INPUT -p udp --dport "$WG_PORT" -j ACCEPT
-        iptables -D FORWARD -i wg0 -j ACCEPT
-        iptables -t nat -D POSTROUTING -s "$IPV4_RANGE".0/24 -o "$DEFAULT_INTERFACE" -j MASQUERADE
-        if [[ $USE_IPV6 -eq 1 ]]; then
-            ip6tables -D FORWARD -i wg0 -j ACCEPT
-            ip6tables -t nat -D POSTROUTING -s "$IPV6_RANGE"/64 -o "$DEFAULT_INTERFACE" -j MASQUERADE
+        echo -e "${GREEN}Finished!${NC}"
+    fi
+    echo
+    echo "The client configuration is available in: $export_dir$client.conf"
+    echo "Private Key: $CLIENT_PRIVATE"
+    echo "New clients can be added by running this script again."
+}
+
+select_menu_option() {
+    echo
+    echo "WireGuard is already installed."
+    echo
+    echo "Select an option:"
+    echo "   1) Add a new client"
+    echo "   2) List existing clients"
+    echo "   3) Remove an existing client"
+    echo "   4) Show QR code for a client"
+    echo "   5) Remove WireGuard"
+    echo "   6) Exit"
+    read -rp "Option: " option
+    until [[ "$option" =~ ^[1-6]$ ]]; do
+        echo "$option: invalid selection."
+        read -rp "Option: " option
+    done
+}
+
+show_clients() {
+    grep '^# BEGIN_PEER' "$WG_CONF" | cut -d ' ' -f 3 | nl -s ') '
+}
+
+enter_client_name() {
+    echo
+    echo "Provide a name for the client:"
+    read -rp "Name: " unsanitized_client
+    [ -z "$unsanitized_client" ] && abort_and_exit
+    set_client_name
+    while [[ -z "$client" ]] || grep -q "^# BEGIN_PEER $client$" "$WG_CONF"; do
+        if [ -z "$client" ]; then
+            echo "Invalid client name. Use one word only, no special characters except '-' and '_'."
+        else
+            echo "$client: invalid name. Client already exists."
+        fi
+        read -rp "Name: " unsanitized_client
+        [ -z "$unsanitized_client" ] && abort_and_exit
+        set_client_name
+    done
+}
+
+update_wg_conf() {
+    wg addconf wg0 <(sed -n "/^# BEGIN_PEER $client/,/^# END_PEER $client/p" "$WG_CONF")
+}
+
+print_client_added() {
+    echo
+    echo "$client added. Configuration available in: $export_dir$client.conf"
+    echo "Private Key: $CLIENT_PRIVATE"
+}
+
+print_check_clients() {
+    echo
+    echo "Checking for existing client(s)..."
+}
+
+check_clients() {
+    num_of_clients=$(grep -c '^# BEGIN_PEER' "$WG_CONF")
+    if [[ "$num_of_clients" = 0 ]]; then
+        echo
+        echo "There are no existing clients!"
+        exit 1
+    fi
+}
+
+print_client_total() {
+    if [ "$num_of_clients" = 1 ]; then
+        printf '\n%s\n' "Total: 1 client"
+    elif [ -n "$num_of_clients" ]; then
+        printf '\n%s\n' "Total: $num_of_clients clients"
+    fi
+}
+
+select_client_to() {
+    echo
+    echo "Select the client to $1:"
+    show_clients
+    read -rp "Client: " client_num
+    [ -z "$client_num" ] && abort_and_exit
+    until [[ "$client_num" =~ ^[0-9]+$ && "$client_num" -le "$num_of_clients" ]]; do
+        echo "$client_num: invalid selection."
+        read -rp "Client: " client_num
+        [ -z "$client_num" ] && abort_and_exit
+    done
+    client=$(grep '^# BEGIN_PEER' "$WG_CONF" | cut -d ' ' -f 3 | sed -n "$client_num"p)
+}
+
+confirm_remove_client() {
+    if [ "$assume_yes" != 1 ]; then
+        echo
+        read -rp "Confirm $client removal? [y/N]: " remove
+        until [[ "$remove" =~ ^[yYnN]*$ ]]; do
+            echo "$remove: invalid selection."
+            read -rp "Confirm $client removal? [y/N]: " remove
+        done
+    else
+        remove=y
+    fi
+}
+
+remove_client_conf() {
+    get_export_dir
+    wg_file="$export_dir$client.conf"
+    if [ -f "$wg_file" ]; then
+        echo "Removing $wg_file..."
+        rm -f "$wg_file"
+    fi
+    rm -f "$export_dir$client.key" "$export_dir$client.pub" "$export_dir$client.psk"
+}
+
+print_remove_client() {
+    echo
+    echo "Removing $client..."
+}
+
+remove_client_wg() {
+    wg set wg0 peer "$(sed -n "/^# BEGIN_PEER $client$/,\$p" "$WG_CONF" | grep -m 1 PublicKey | cut -d " " -f 3)" remove
+    sed -i "/^# BEGIN_PEER $client$/,/^# END_PEER $client$/d" "$WG_CONF"
+    remove_client_conf
+}
+
+print_client_removed() {
+    echo
+    echo "$client removed!"
+}
+
+print_client_removal_aborted() {
+    echo
+    echo "$client removal aborted!"
+}
+
+check_client_conf() {
+    wg_file="$export_dir$client.conf"
+    if [ ! -f "$wg_file" ]; then
+        echo "Error: Cannot show QR code. Missing client config file $wg_file" >&2
+        echo "       You may instead re-run this script and add a new client." >&2
+        exit 1
+    fi
+}
+
+print_client_conf() {
+    echo
+    echo "Configuration for '$client' is available in: $wg_file"
+}
+
+confirm_remove_wg() {
+    if [ "$assume_yes" != 1 ]; then
+        echo
+        read -rp "Confirm WireGuard removal? [y/N]: " remove
+        until [[ "$remove" =~ ^[yYnN]*$ ]]; do
+            echo "$remove: invalid selection."
+            read -rp "Confirm WireGuard removal? [y/N]: " remove
+        done
+    else
+        remove=y
+    fi
+}
+
+print_remove_wg() {
+    echo
+    echo "Removing WireGuard, please wait..."
+}
+
+disable_wg_service() {
+    systemctl disable --now wg-quick@wg0.service
+}
+
+remove_sysctl_rules() {
+    rm -f /etc/sysctl.d/99-wireguard-forward.conf
+    if [ ! -f /usr/sbin/openvpn ] && [ ! -f /usr/sbin/ipsec ] && [ ! -f /usr/local/sbin/ipsec ]; then
+        echo 0 > /proc/sys/net/ipv4/ip_forward
+        echo 0 > /proc/sys/net/ipv6/conf/all/forwarding
+    fi
+}
+
+remove_rclocal_rules() {
+    ipt_cmd="systemctl restart wg-iptables.service"
+    if grep -qs "$ipt_cmd" /etc/rc.local; then
+        sed --follow-symlinks -i "/^$ipt_cmd/d" /etc/rc.local
+    fi
+}
+
+print_wg_removed() {
+    echo
+    echo "WireGuard removed!"
+}
+
+print_wg_removal_aborted() {
+    echo
+    echo "WireGuard removal aborted!"
+}
+
+wgsetup() {
+    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    check_root
+    check_shell
+    check_kernel
+    check_os
+    check_os_ver
+    check_container
+
+    WG_CONF="/etc/wireguard/wg0.conf"
+
+    auto=0
+    assume_yes=0
+    add_client=0
+    list_clients=0
+    remove_client=0
+    show_client_qr=0
+    remove_wg=0
+    public_ip=""
+    server_addr=""
+    server_port=""
+    first_client_name=""
+    unsanitized_client=""
+    client=""
+    dns=""
+    dns1=""
+    dns2=""
+
+    parse_args "$@"
+    check_args
+
+    if [ "$add_client" = 1 ]; then
+        show_header
+        enter_client_name
+        select_dns
+        new_client add_client
+        update_wg_conf
+        echo
+        show_client_qr_code
+        print_client_added
+        exit 0
+    fi
+
+    if [ "$list_clients" = 1 ]; then
+        show_header
+        print_check_clients
+        check_clients
+        echo
+        show_clients
+        print_client_total
+        exit 0
+    fi
+
+    if [ "$remove_client" = 1 ]; then
+        show_header
+        confirm_remove_client
+        if [[ "$remove" =~ ^[yY]$ ]]; then
+            print_remove_client
+            remove_client_wg
+            print_client_removed
+            exit 0
+        else
+            print_client_removal_aborted
+            exit 1
         fi
     fi
-    case $os in
-        "ubuntu"|"debian") apt remove -y wireguard ;;
-        "centos") yum remove -y wireguard-tools ;;
-        "fedora") dnf remove -y wireguard-tools ;;
-        "opensuse") zypper remove -y wireguard-tools ;;
-    esac
-    sysctl -w net.ipv4.ip_forward=0
-    sysctl -w net.ipv6.conf.all.forwarding=0
-    msg "success" "تم إزالة WireGuard"
-}
 
-# معالجة خيارات سطر الأوامر
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --auto) AUTO=1; shift ;;
-        --default) DEFAULT_MODE=1; shift ;;
-        --addclient) ADD_CLIENT="$2"; shift 2 ;;
-        --listclients) LIST_CLIENTS=1; shift ;;
-        --removeclient) REMOVE_CLIENT="$2"; shift 2 ;;
-        --uninstall) UNINSTALL=1; shift ;;
-        --port) WG_PORT="$2"; shift 2 ;;
-        --clientname) CLIENT_NAME="$2"; shift 2 ;;
-        --dns1) DNS_SERVER="$2"; shift 2 ;;
-        --help) 
-            echo "الاستخدام: $0 [--auto | --default | --addclient NAME | --listclients | --removeclient NAME | --uninstall]"
-            exit 0 ;;
-        *) msg "error" "خيار غير معروف: $1"; exit 1 ;;
-    esac
-done
+    if [ "$show_client_qr" = 1 ]; then
+        show_header
+        echo
+        get_export_dir
+        check_client_conf
+        show_client_qr_code
+        print_client_conf
+        exit 0
+    fi
 
-# التنفيذ
-check_root
-check_kernel
-check_os
-if [[ $ADD_CLIENT ]]; then
-    install_deps
-    detect_public_ip
-    add_client "$ADD_CLIENT"
-elif [[ $LIST_CLIENTS ]]; then
-    [[ ! -f "$WG_CONFIG" ]] && msg "error" "WireGuard غير مثبت"
-    list_clients
-elif [[ $REMOVE_CLIENT ]]; then
-    [[ ! -f "$WG_CONFIG" ]] && msg "error" "WireGuard غير مثبت"
-    remove_client "$REMOVE_CLIENT"
-elif [[ $UNINSTALL ]]; then
-    remove_wireguard
-elif [[ $DEFAULT_MODE ]]; then
-    echo -e "${YELLOW}جارٍ التثبيت بالوضع الافتراضي...${NC}"
-    install_deps
-    detect_public_ip
-    setup_firewall
-    optimize_sysctl
-    setup_server
-    systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0 || msg "error" "فشل تشغيل الخدمة\n$(systemctl status wg-quick@wg0.service)"
-    add_client
-    echo -e "${GREEN}تم التثبيت!${NC}"
-elif [[ $AUTO ]]; then
-    install_deps
-    detect_public_ip
-    setup_firewall
-    optimize_sysctl
-    setup_server
-    systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0 || msg "error" "فشل تشغيل الخدمة\n$(systemctl status wg-quick@wg0.service)"
-    add_client "$CLIENT_NAME"
-else
-    if [[ -f "$WG_CONFIG" ]]; then
-        echo -e "${GREEN}WireGuard مثبت، اختر:${NC}"
-        echo "1) إضافة عميل"
-        echo "2) قائمة العملاء"
-        echo "3) إزالة عميل"
-        echo "4) إزالة WireGuard"
-        read -p "اختيارك: " choice
-        case $choice in
-            1) add_client ;;
-            2) list_clients ;;
-            3) remove_client ;;
-            4) remove_wireguard ;;
-            *) exit 0 ;;
-        esac
+    if [ "$remove_wg" = 1 ]; then
+        show_header
+        confirm_remove_wg
+        if [[ "$remove" =~ ^[yY]$ ]]; then
+            print_remove_wg
+            remove_firewall_rules
+            disable_wg_service
+            remove_sysctl_rules
+            remove_rclocal_rules
+            remove_pkgs
+            print_wg_removed
+            exit 0
+        else
+            print_wg_removal_aborted
+            exit 1
+        fi
+    fi
+
+    if [[ ! -e "$WG_CONF" ]]; then
+        check_nftables
+        install_wget
+        install_iproute
+        show_welcome
+        if [ "$auto" = 0 ]; then
+            enter_server_address
+        else
+            if [ -n "$server_addr" ]; then
+                ip="$server_addr"
+            else
+                detect_ip
+                check_nat_ip
+            fi
+        fi
+        show_config
+        detect_ipv6
+        select_port
+        enter_first_client_name
+        select_dns
+        show_setup_ready
+        check_firewall
+        confirm_setup
+        show_start_setup
+        install_pkgs
+        create_server_config
+        update_sysctl
+        create_firewall_rules
+        if [ "$os" != "openSUSE" ]; then
+            update_rclocal
+        fi
+        new_client
+        start_wg_service
+        echo
+        show_client_qr_code
+        if [ "$auto" != 0 ] && check_dns_name "$server_addr"; then
+            show_dns_name_note "$server_addr"
+        fi
+        finish_setup
     else
-        echo -e "${GREEN}اختر وضع التثبيت:${NC}"
-        echo "1) الوضع الافتراضي"
-        echo "2) الوضع الاختياري"
-        read -p "اختيارك [1-2]: " mode_choice
-        case $mode_choice in
+        show_header
+        select_menu_option
+        case "$option" in
             1)
-                echo -e "${YELLOW}جارٍ التثبيت بالوضع الافتراضي...${NC}"
-                install_deps
-                detect_public_ip
-                setup_firewall
-                optimize_sysctl
-                setup_server
-                systemctl enable wg-quick@wg0
-                systemctl start wg-quick@wg0 || msg "error" "فشل تشغيل الخدمة\n$(systemctl status wg-quick@wg0.service)"
-                add_client
-                echo -e "${GREEN}تم التثبيت!${NC}"
+                enter_client_name
+                select_dns
+                new_client add_client
+                update_wg_conf
+                echo
+                show_client_qr_code
+                print_client_added
+                exit 0
                 ;;
-            2|"")
-                echo -e "${YELLOW}جارٍ التثبيت بالوضع الاختياري...${NC}"
-                install_deps
-                detect_public_ip
-                setup_firewall
-                optimize_sysctl
-                setup_server
-                systemctl enable wg-quick@wg0
-                systemctl start wg-quick@wg0 || msg "error" "فشل تشغيل الخدمة\n$(systemctl status wg-quick@wg0.service)"
-                add_client
-                echo -e "${GREEN}تم التثبيت!${NC}"
+            2)
+                print_check_clients
+                check_clients
+                echo
+                show_clients
+                print_client_total
+                exit 0
                 ;;
-            *) msg "error" "اختيار غير صالح" ;;
+            3)
+                check_clients
+                select_client_to remove
+                confirm_remove_client
+                if [[ "$remove" =~ ^[yY]$ ]]; then
+                    print_remove_client
+                    remove_client_wg
+                    print_client_removed
+                    exit 0
+                else
+                    print_client_removal_aborted
+                    exit 1
+                fi
+                ;;
+            4)
+                check_clients
+                select_client_to "show QR code for"
+                echo
+                get_export_dir
+                check_client_conf
+                show_client_qr_code
+                print_client_conf
+                exit 0
+                ;;
+            5)
+                confirm_remove_wg
+                if [[ "$remove" =~ ^[yY]$ ]]; then
+                    print_remove_wg
+                    remove_firewall_rules
+                    disable_wg_service
+                    remove_sysctl_rules
+                    remove_rclocal_rules
+                    remove_pkgs
+                    print_wg_removed
+                    exit 0
+                else
+                    print_wg_removal_aborted
+                    exit 1
+                fi
+                ;;
+            6)
+                exit 0
+                ;;
         esac
     fi
-fi
+}
+
+wgsetup "$@"
+
+exit 0
