@@ -385,7 +385,7 @@ setup_vpn_config() {
     cat > "$VPN_CONFIG" << EOF
 # HOST $ENDPOINT
 [Interface]
-Address = 10.7.0.1/24$( [ "$IPV6_ON" = 1 ] && echo ", ${VPN_IPV6}1/64" )
+Address = ${VPN_IPV4}.1/24$( [ "$IPV6_ON" = 1 ] && echo ", ${VPN_IPV6}1/64" )
 PrivateKey = $SERVER_PRIV
 ListenPort = $PORT_NUM
 EOF
@@ -396,15 +396,15 @@ configure_network_rules() {
     local net_if=$(ip route | grep default | awk '{print $5}' | head -1)
     if systemctl is-active --quiet firewalld.service; then
         firewall-cmd --add-port="$PORT_NUM"/udp --permanent
-        firewall-cmd --zone=trusted --add-source="10.7.0.0/24" --permanent
-        firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j MASQUERADE --permanent
+        firewall-cmd --zone=trusted --add-source="${VPN_IPV4}.0/24" --permanent
+        firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s ${VPN_IPV4}.0/24 ! -d ${VPN_IPV4}.0/24 -j MASQUERADE --permanent
         [ "$IPV6_ON" = 1 ] && firewall-cmd --zone=trusted --add-source="${VPN_IPV6}/64" --permanent
         firewall-cmd --reload
     else
         iptables -A INPUT -p udp --dport "$PORT_NUM" -j ACCEPT
-        iptables -A FORWARD -s 10.7.0.0/24 -j ACCEPT
+        iptables -A FORWARD -s ${VPN_IPV4}.0/24 -j ACCEPT
         iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-        iptables -t nat -A POSTROUTING -s 10.7.0.0/24 -o "$net_if" -j MASQUERADE
+        iptables -t nat -A POSTROUTING -s ${VPN_IPV4}.0/24 -o "$net_if" -j MASQUERADE
         [ "$IPV6_ON" = 1 ] && ip6tables -t nat -A POSTROUTING -s "${VPN_IPV6}/64" -o "$net_if" -j MASQUERADE
     fi
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-vpn.conf
@@ -455,6 +455,11 @@ PersistentKeepalive = $KEEPALIVE_DEFAULT
 EOF
     chmod 600 "$USER_DIR/$user_name.conf"
     wg addconf wg0 <(grep -A 4 "^# USER_START $user_name" "$VPN_CONFIG")
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to add user configuration dynamically. Restarting service:${NC}"
+        systemctl restart wg-quick@wg0.service
+        [ $? -ne 0 ] && terminate "Failed to restart WireGuard service. Check systemctl status wg-quick@wg0.service."
+    fi
     echo -e "${GREEN}Added user '$user_name' with IP: ${VPN_IPV4}.$ip_octet${NC}"
     [ "$IPV6_ON" = 1 ] && echo -e "${GREEN}IPv6 IP: ${VPN_IPV6}$ip_octet${NC}"
     qrencode -t UTF8 < "$USER_DIR/$user_name.conf"
@@ -463,7 +468,12 @@ EOF
 
 launch_vpn() {
     systemctl enable wg-quick@wg0.service
-    systemctl start wg-quick@wg0.service || terminate "Failed to start VPN service."
+    systemctl start wg-quick@wg0.service
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to start VPN service. Details:${NC}"
+        systemctl status wg-quick@wg0.service
+        terminate "Service start failed."
+    fi
 }
 
 finalize_setup() {
@@ -513,7 +523,7 @@ wipe_vpn() {
     systemctl disable wg-quick@wg0
     rm -rf /etc/wireguard "$USER_DIR" /etc/sysctl.d/99-vpn.conf
     iptables -D INPUT -p udp --dport "$PORT_NUM" -j ACCEPT 2>/dev/null
-    iptables -t nat -D POSTROUTING -s "10.7.0.0/24" -j MASQUERADE 2>/dev/null
+    iptables -t nat -D POSTROUTING -s "${VPN_IPV4}.0/24" -j MASQUERADE 2>/dev/null
     [ "$IPV6_ON" = 1 ] && ip6tables -t nat -D POSTROUTING -s "${VPN_IPV6}/64" -j MASQUERADE 2>/dev/null
     case "$OS_TYPE" in
         "ubuntu"|"debian") apt-get remove -y wireguard qrencode iptables 2>/dev/null ;;
@@ -536,6 +546,11 @@ deploy_vpn() {
 
     VPN_CONFIG="/etc/wireguard/wg0.conf"
     USER_DIR="$HOME/wireguard-users"
+    VPN_IPV4="10.7.0"  # Correctly defined here
+    VPN_IPV6="fddd:2c4:2c4:2c4::"
+    DNS_DEFAULT="8.8.8.8, 8.8.4.4"
+    KEEPALIVE_DEFAULT=25
+    PORT_DEFAULT=51820
 
     FAST_MODE=0
     CONFIRM_YES=0
@@ -596,7 +611,7 @@ deploy_vpn() {
 
     if [ ! -e "$VPN_CONFIG" ]; then
         greet_user
-        [ "$FAST_MODE" = 0 ] && choose_endpoint || choose_endpoint
+        choose_endpoint
         set_vpn_port
         configure_ip_versions
         set_first_user
