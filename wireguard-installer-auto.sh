@@ -225,6 +225,8 @@ fetch_endpoint() {
     else
         [ -n "$ENDPOINT_NAME" ] && ENDPOINT_IP="$ENDPOINT_NAME" || detect_ip_address
     fi
+    # Ensure ENDPOINT_IP is set
+    [ -z "$ENDPOINT_IP" ] && fail "Failed to determine endpoint IP address."
 }
 
 detect_ip_address() {
@@ -272,7 +274,7 @@ set_port() {
             PORT_NUM="${port_input:-51820}"
         done
     fi
-    # Ensure PORT_NUM is always set, even in auto mode
+    # Ensure PORT_NUM is always set
     PORT_NUM="${PORT_NUM:-$PORT_DEFAULT}"
     echo -e "${BLUE}Using Port: $PORT_NUM${NC}"
 }
@@ -482,6 +484,7 @@ AllowedIPs = ${VPN_IPV4}.$ip_octet/32$( [ "$ENABLE_IPV6" = 1 ] && echo ", ${VPN_
 # END_PEER $user_name
 EOF
     SERVER_PUB=$(cat /etc/wireguard/server.pub)
+    [ -z "$ENDPOINT_IP" ] && fail "Endpoint IP is not set. Cannot create user config."
     cat > "$USER_DIR/$user_name.conf" << EOF
 [Interface]
 Address = ${VPN_IPV4}.$ip_octet/24$( [ "$ENABLE_IPV6" = 1 ] && echo ", ${VPN_IPV6}$ip_octet/64" )
@@ -601,8 +604,9 @@ main() {
     verify_system_version
     check_container_env
 
-    # Ensure PORT_NUM is set before proceeding with setup
-    set_port  # Moved to ensure port is set early
+    # Ensure PORT_NUM and ENDPOINT_IP are set before proceeding
+    set_port
+    fetch_endpoint
 
     if [ "$ADD_USER" = 1 ]; then
         sanitize_name
@@ -618,7 +622,6 @@ main() {
         uninstall_vpn
     elif [ "$AUTO_SETUP" = 1 ]; then
         welcome_message
-        fetch_endpoint
         set_ip_version
         choose_dns
         setup_packages
@@ -648,7 +651,6 @@ main() {
             esac
         else
             welcome_message
-            fetch_endpoint
             set_ip_version
             set_initial_user
             choose_dns
