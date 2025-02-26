@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# سكريبت تثبيت وإدارة WireGuard محسّن مع تحسينات في الأمان، الاتصال، وتجربة المستخدم
-# المؤلف: Grok 3 (بتاريخ 26 فبراير 2025)
+# سكريبت تثبيت وإدارة WireGuard محسّن مع وضع افتراضي واختياري
 
 # ألوان
 RED='\033[0;31m'
@@ -17,7 +16,7 @@ CLIENT_DIR="$HOME/wireguard-clients"
 LOG_FILE="$HOME/wireguard.log"
 IPV4_RANGE="10.0.0"
 IPV6_RANGE="fd00::"
-DNS_SERVER="8.8.8.8"
+DNS_SERVER="8.8.8.8, 8.8.4.4"
 KEEPALIVE=25
 PUBLIC_IP=""
 SERVER_ADDR=""
@@ -109,7 +108,6 @@ setup_firewall() {
         [[ -n "$IPV6_RANGE" ]] && $ip6tables_path -t nat -A POSTROUTING -s "$IPV6_RANGE"::/64 -j MASQUERADE
         prevent_dns_leak
     fi
-    # تعطيل ICMP لتحسين الأمان
     echo "net.ipv4.icmp_echo_ignore_all=1" >> /etc/sysctl.conf
     sysctl -p
 }
@@ -153,10 +151,10 @@ select_dns() {
     echo "  1) Google (8.8.8.8, 8.8.4.4)"
     echo "  2) Cloudflare (1.1.1.1, 1.0.0.1)"
     echo "  3) OpenDNS (208.67.222.222, 208.67.220.220)"
-    echo "  4) AdGuard (94.140.14.14, 94.140.15.15) - حماية من الإعلانات"
-    echo "  5) Quad9 (9.9.9.9, 149.112.112.112) - حماية من البرمجيات الخبيثة"
-    echo "  6) NextDNS (45.90.28.0, 45.90.30.0) - تصفية متقدمة"
-    echo "  7) CleanBrowsing (185.228.168.168, 185.228.169.168) - تصفية عائلية"
+    echo "  4) AdGuard (94.140.14.14, 94.140.15.15)"
+    echo "  5) Quad9 (9.9.9.9, 149.112.112.112)"
+    echo "  6) NextDNS (45.90.28.0, 45.90.30.0)"
+    echo "  7) CleanBrowsing (185.228.168.168, 185.228.169.168)"
     echo "  8) مخصص"
     read -p "اختيارك [1]: " dns_choice
     case $dns_choice in
@@ -173,10 +171,15 @@ select_dns() {
 }
 
 setup_server() {
-    read -p "أدخل المنفذ [$WG_PORT]: " port
-    WG_PORT=${port:-$WG_PORT}
-    read -p "أدخل MTU [$MTU]: " mtu_input
-    MTU=${mtu_input:-$MTU}
+    if [[ $DEFAULT_MODE ]]; then
+        WG_PORT=51820
+        MTU=1420
+    else
+        read -p "أدخل المنفذ [$WG_PORT]: " port
+        WG_PORT=${port:-$WG_PORT}
+        read -p "أدخل MTU [$MTU]: " mtu_input
+        MTU=${mtu_input:-$MTU}
+    fi
     wg genkey | tee /etc/wireguard/server_privatekey | wg pubkey > /etc/wireguard/server_publickey
     [[ -s /etc/wireguard/server_privatekey ]] || msg "error" "فشل إنشاء مفتاح الخادم"
     SERVER_PRIVATE=$(cat /etc/wireguard/server_privatekey)
@@ -196,10 +199,15 @@ EOF
 
 add_client() {
     local client_name=${1:-$CLIENT_NAME}
-    read -p "اسم العميل [$client_name]: " input_name
-    client_name=${input_name:-$client_name}
-    [[ ! "$client_name" =~ ^[a-zA-Z0-9_-]+$ ]] && msg "error" "اسم العميل يجب أن يحتوي فقط على أحرف، أرقام، -، أو _"
-    read -p "عنوان IP (مثال: $IPV4_RANGE.2): " client_ip
+    if [[ $DEFAULT_MODE ]]; then
+        client_name="client_$((RANDOM % 1000))"
+        client_ip="$IPV4_RANGE.2"
+    else
+        read -p "اسم العميل [$client_name]: " input_name
+        client_name=${input_name:-$client_name}
+        [[ ! "$client_name" =~ ^[a-zA-Z0-9_-]+$ ]] && msg "error" "اسم العميل يجب أن يحتوي فقط على أحرف، أرقام، -، أو _"
+        read -p "عنوان IP (مثال: $IPV4_RANGE.2): " client_ip
+    fi
     if grep -q "AllowedIPs = $client_ip" "$WG_CONFIG"; then
         msg "error" "العنوان $client_ip مستخدم"
         return
@@ -216,8 +224,12 @@ add_client() {
     echo "PresharedKey = $CLIENT_PSK" >> "$WG_CONFIG"
     echo "AllowedIPs = $client_ip/32${IPV6_RANGE:+, $IPV6_RANGE:$((RANDOM % 1000 + 2))/128}" >> "$WG_CONFIG"
     echo "# END_PEER $client_name" >> "$WG_CONFIG"
-    read -p "PersistentKeepalive [$KEEPALIVE]: " keepalive
-    KEEPALIVE=${keepalive:-$KEEPALIVE}
+    if [[ $DEFAULT_MODE ]]; then
+        KEEPALIVE=25
+    else
+        read -p "PersistentKeepalive [$KEEPALIVE]: " keepalive
+        KEEPALIVE=${keepalive:-$KEEPALIVE}
+    fi
     cat > "$CLIENT_DIR/$client_name.conf" <<EOF
 [Interface]
 PrivateKey = $CLIENT_PRIVATE
@@ -306,7 +318,8 @@ show_help() {
     echo -e "${GREEN}=== WireGuard Enhanced Script ==="
     echo "الاستخدام: $0 [خيارات]"
     echo -e "الخيارات:${NC}"
-    echo "  --auto             تثبيت تلقائي"
+    echo "  --auto             تثبيت تلقائي (وضع اختياري)"
+    echo "  --default          تثبيت تلقائي بالإعدادات الافتراضية"
     echo "  --addclient NAME   إضافة عميل جديد"
     echo "  --listclients      قائمة العملاء"
     echo "  --removeclient NAME إزالة عميل"
@@ -325,6 +338,7 @@ show_help() {
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --auto) AUTO=1; shift ;;
+        --default) DEFAULT_MODE=1; shift ;;
         --addclient) ADD_CLIENT="$2"; shift 2 ;;
         --listclients) LIST_CLIENTS=1; shift ;;
         --removeclient) REMOVE_CLIENT="$2"; shift 2 ;;
@@ -364,6 +378,17 @@ elif [[ $SHOW_QR ]]; then
     msg "info" "رمز QR لـ $SHOW_QR"
 elif [[ $UNINSTALL ]]; then
     remove_wireguard
+elif [[ $DEFAULT_MODE ]]; then
+    echo -e "${YELLOW}جارٍ التثبيت بالوضع الافتراضي... [=>]${NC}"
+    install_deps
+    detect_public_ip
+    setup_firewall
+    optimize_sysctl
+    setup_server
+    systemctl enable wg-quick@wg0
+    systemctl start wg-quick@wg0
+    add_client
+    echo -e "${GREEN}تم التثبيت بالوضع الافتراضي! [========>]${NC}"
 elif [[ $AUTO ]]; then
     install_deps
     detect_public_ip
@@ -391,16 +416,38 @@ else
             *) exit 0 ;;
         esac
     else
-        echo -e "${YELLOW}جارٍ إعداد WireGuard... [=>]${NC}"
-        install_deps
-        detect_public_ip
-        setup_firewall
-        optimize_sysctl
-        select_dns
-        setup_server
-        systemctl enable wg-quick@wg0
-        systemctl start wg-quick@wg0
-        add_client
-        echo -e "${GREEN}تم إكمال التثبيت! [========>]${NC}"
+        echo -e "${GREEN}اختر وضع التثبيت:${NC}"
+        echo "1) الوضع الافتراضي (تلقائي بالكامل)"
+        echo "2) الوضع الاختياري (تخصيص الإعدادات)"
+        read -p "اختيارك [1-2]: " mode_choice
+        case $mode_choice in
+            1)
+                DEFAULT_MODE=1
+                echo -e "${YELLOW}جارٍ التثبيت بالوضع الافتراضي... [=>]${NC}"
+                install_deps
+                detect_public_ip
+                setup_firewall
+                optimize_sysctl
+                setup_server
+                systemctl enable wg-quick@wg0
+                systemctl start wg-quick@wg0
+                add_client
+                echo -e "${GREEN}تم التثبيت بالوضع الافتراضي! [========>]${NC}"
+                ;;
+            2|"")
+                echo -e "${YELLOW}جارٍ إعداد WireGuard بالوضع الاختياري... [=>]${NC}"
+                install_deps
+                detect_public_ip
+                setup_firewall
+                optimize_sysctl
+                select_dns
+                setup_server
+                systemctl enable wg-quick@wg0
+                systemctl start wg-quick@wg0
+                add_client
+                echo -e "${GREEN}تم إكمال التثبيت بالوضع الاختياري! [========>]${NC}"
+                ;;
+            *) msg "error" "اختيار غير صالح" ;;
+        esac
     fi
 fi
