@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # سكريبت تثبيت وإدارة WireGuard محسّن مع وضع افتراضي واختياري
-# (بتاريخ 26 فبراير 2025)
 
 # ضبط umask لضمان أذونات آمنة
 umask 077
@@ -26,6 +25,7 @@ PUBLIC_IP=""
 SERVER_ADDR=""
 CLIENT_NAME="client"
 MTU=1420
+USE_IPV6=1  # 1 لتفعيل IPv6، 0 لتعطيله
 
 # دوال مساعدة
 msg() {
@@ -110,7 +110,7 @@ setup_firewall() {
         firewall-cmd --permanent --add-port="$WG_PORT"/udp
         firewall-cmd --permanent --zone=trusted --add-source="$IPV4_RANGE".0/24
         firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -j MASQUERADE
-        [[ -n "$IPV6_RANGE" ]] && firewall-cmd --permanent --zone=trusted --add-source="$IPV6_RANGE"::/64
+        [[ $USE_IPV6 -eq 1 ]] && firewall-cmd --permanent --zone=trusted --add-source="$IPV6_RANGE"/64
         firewall-cmd --reload
     else
         iptables_path=$(command -v iptables)
@@ -120,8 +120,10 @@ setup_firewall() {
         $iptables_path -A FORWARD -i wg0 -j ACCEPT
         $iptables_path -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
         $iptables_path -t nat -A POSTROUTING -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -o "$DEFAULT_INTERFACE" -j MASQUERADE
-        [[ -n "$IPV6_RANGE" ]] && $ip6tables_path -A FORWARD -i wg0 -j ACCEPT
-        [[ -n "$IPV6_RANGE" ]] && $ip6tables_path -t nat -A POSTROUTING -s "$IPV6_RANGE"::/64 -o "$DEFAULT_INTERFACE" -j MASQUERADE
+        if [[ $USE_IPV6 -eq 1 ]]; then
+            $ip6tables_path -A FORWARD -i wg0 -j ACCEPT
+            $ip6tables_path -t nat -A POSTROUTING -s "$IPV6_RANGE"/64 -o "$DEFAULT_INTERFACE" -j MASQUERADE
+        fi
         prevent_dns_leak
     fi
     echo "net.ipv4.icmp_echo_ignore_all=1" >> /etc/sysctl.conf
@@ -191,22 +193,33 @@ setup_server() {
     if [[ $DEFAULT_MODE ]]; then
         WG_PORT=51820
         MTU=1420
+        USE_IPV6=1
     else
         read -p "أدخل المنفذ [$WG_PORT]: " port
         WG_PORT=${port:-$WG_PORT}
         read -p "أدخل MTU [$MTU]: " mtu_input
         MTU=${mtu_input:-$MTU}
+        read -p "هل تريد تفعيل IPv6؟ (y/n) [y]: " ipv6_input
+        case $ipv6_input in
+            n|N) USE_IPV6=0 ;;
+            *) USE_IPV6=1 ;;
+        esac
     fi
     detect_interface
     wg genkey | tee /etc/wireguard/server_privatekey | wg pubkey > /etc/wireguard/server_publickey
     [[ -s /etc/wireguard/server_privatekey ]] || msg "error" "فشل إنشاء مفتاح الخادم"
     SERVER_PRIVATE=$(cat /etc/wireguard/server_privatekey)
     SERVER_PUBLIC=$(cat /etc/wireguard/server_publickey)
+    if [[ $USE_IPV6 -eq 1 ]]; then
+        IPV6_ADDRESS="$IPV6_RANGE:1/64"
+    else
+        IPV6_ADDRESS=""
+    fi
     cat > "$WG_CONFIG" <<EOF
 # ENDPOINT $PUBLIC_IP
 [Interface]
 PrivateKey = $SERVER_PRIVATE
-Address = $IPV4_RANGE.1/24${IPV6_RANGE:+, $IPV6_RANGE:1/64}
+Address = $IPV4_RANGE.1/24${IPV6_ADDRESS:+, $IPV6_ADDRESS}
 ListenPort = $WG_PORT
 MTU = $MTU
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
@@ -236,11 +249,18 @@ add_client() {
     CLIENT_PRIVATE=$(cat "$CLIENT_DIR/$client_name.key")
     CLIENT_PUBLIC=$(cat "$CLIENT_DIR/$client_name.pub")
     CLIENT_PSK=$(cat "$CLIENT_DIR/$client_name.psk")
+    if [[ $USE_IPV6 -eq 1 ]]; then
+        CLIENT_IPV6_ADDRESS="$IPV6_RANGE:$((RANDOM % 1000 + 2))/128"
+        CLIENT_IPV6_SUBNET="$IPV6_RANGE:$((RANDOM % 1000 + 2))/64"
+    else
+        CLIENT_IPV6_ADDRESS=""
+        CLIENT_IPV6_SUBNET=""
+    fi
     echo -e "\n# BEGIN_PEER $client_name" >> "$WG_CONFIG"
     echo "[Peer]" >> "$WG_CONFIG"
     echo "PublicKey = $CLIENT_PUBLIC" >> "$WG_CONFIG"
     echo "PresharedKey = $CLIENT_PSK" >> "$WG_CONFIG"
-    echo "AllowedIPs = $client_ip/32${IPV6_RANGE:+, $IPV6_RANGE:$((RANDOM % 1000 + 2))/128}" >> "$WG_CONFIG"
+    echo "AllowedIPs = $client_ip/32${CLIENT_IPV6_ADDRESS:+, $CLIENT_IPV6_ADDRESS}" >> "$WG_CONFIG"
     echo "# END_PEER $client_name" >> "$WG_CONFIG"
     if [[ $DEFAULT_MODE ]]; then
         KEEPALIVE=25
@@ -251,7 +271,7 @@ add_client() {
     cat > "$CLIENT_DIR/$client_name.conf" <<EOF
 [Interface]
 PrivateKey = $CLIENT_PRIVATE
-Address = $client_ip/24${IPV6_RANGE:+, $IPV6_RANGE:$((RANDOM % 1000 + 2))/64}
+Address = $client_ip/24${CLIENT_IPV6_SUBNET:+, $CLIENT_IPV6_SUBNET}
 DNS = $DNS_SERVER
 MTU = $MTU
 
@@ -259,7 +279,7 @@ MTU = $MTU
 PublicKey = $SERVER_PUBLIC
 PresharedKey = $CLIENT_PSK
 Endpoint = $PUBLIC_IP:$WG_PORT
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = 0.0.0.0/0${USE_IPV6:+, ::/0}
 PersistentKeepalive = $KEEPALIVE
 EOF
     chmod 600 "$CLIENT_DIR/$client_name.conf"
@@ -317,14 +337,16 @@ remove_wireguard() {
     if command -v firewall-cmd &>/dev/null; then
         firewall-cmd --permanent --remove-port="$WG_PORT"/udp
         firewall-cmd --permanent --zone=trusted --remove-source="$IPV4_RANGE".0/24
-        [[ -n "$IPV6_RANGE" ]] && firewall-cmd --permanent --zone=trusted --remove-source="$IPV6_RANGE"::/64
+        [[ $USE_IPV6 -eq 1 ]] && firewall-cmd --permanent --zone=trusted --remove-source="$IPV6_RANGE"/64
         firewall-cmd --reload
     else
         iptables -D INPUT -p udp --dport "$WG_PORT" -j ACCEPT
         iptables -D FORWARD -i wg0 -j ACCEPT
         iptables -t nat -D POSTROUTING -s "$IPV4_RANGE".0/24 ! -d "$IPV4_RANGE".0/24 -o "$DEFAULT_INTERFACE" -j MASQUERADE
-        [[ -n "$IPV6_RANGE" ]] && ip6tables -D FORWARD -i wg0 -j ACCEPT
-        [[ -n "$IPV6_RANGE" ]] && ip6tables -t nat -D POSTROUTING -s "$IPV6_RANGE"::/64 -o "$DEFAULT_INTERFACE" -j MASQUERADE
+        if [[ $USE_IPV6 -eq 1 ]]; then
+            ip6tables -D FORWARD -i wg0 -j ACCEPT
+            ip6tables -t nat -D POSTROUTING -s "$IPV6_RANGE"/64 -o "$DEFAULT_INTERFACE" -j MASQUERADE
+        fi
     fi
     case $os in
         "ubuntu"|"debian") apt remove -y wireguard ;;
