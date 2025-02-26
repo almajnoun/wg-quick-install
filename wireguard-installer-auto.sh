@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# سكريبت تثبيت وإدارة WireGuard مبني على hwdsl2 مع تحسينات
-# المؤلف: Grok 3 (بتاريخ 26 فبراير 2025)
+# ضبط umask لضمان أذونات آمنة
+umask 077
 
 # ألوان
 RED='\033[0;31m'
@@ -154,22 +154,22 @@ select_dns() {
     echo "اختر خادم DNS:"
     echo "  1) Google (8.8.8.8, 8.8.4.4)"
     echo "  2) Cloudflare (1.1.1.1, 1.0.0.1)"
-    echo "  3) OpenDNS (208.67.222.222)"
-    echo "  4) AdGuard (94.140.14.14)"
-    echo "  5) Quad9 (9.9.9.9)"
-    echo "  6) NextDNS (45.90.28.0)"
-    echo "  7) CleanBrowsing (185.228.168.168)"
+    echo "  3) OpenDNS (208.67.222.222, 208.67.220.220)"
+    echo "  4) AdGuard (94.140.14.14, 94.140.15.15)"
+    echo "  5) Quad9 (9.9.9.9, 149.112.112.112)"
+    echo "  6) NextDNS (45.90.28.0, 45.90.30.0)"
+    echo "  7) CleanBrowsing (185.228.168.168, 185.228.169.168)"
     echo "  8) مخصص"
     read -p "اختيارك [1]: " dns_choice
     case $dns_choice in
         1|"") DNS_SERVER="8.8.8.8, 8.8.4.4" ;;
         2) DNS_SERVER="1.1.1.1, 1.0.0.1" ;;
-        3) DNS_SERVER="208.67.222.222" ;;
-        4) DNS_SERVER="94.140.14.14" ;;
-        5) DNS_SERVER="9.9.9.9" ;;
-        6) DNS_SERVER="45.90.28.0" ;;
-        7) DNS_SERVER="185.228.168.168" ;;
-        8) read -p "أدخل DNS: " DNS_SERVER ;;
+        3) DNS_SERVER="208.67.222.222, 208.67.220.220" ;;
+        4) DNS_SERVER="94.140.14.14, 94.140.15.15" ;;
+        5) DNS_SERVER="9.9.9.9, 149.112.112.112" ;;
+        6) DNS_SERVER="45.90.28.0, 45.90.30.0" ;;
+        7) DNS_SERVER="185.228.168.168, 185.228.169.168" ;;
+        8) read -p "أدخل DNS (مثال: 8.8.8.8 أو 8.8.8.8, 8.8.4.4): " DNS_SERVER ;;
         *) DNS_SERVER="8.8.8.8, 8.8.4.4" ;;
     esac
 }
@@ -179,6 +179,7 @@ setup_server() {
         WG_PORT=51820
         MTU=1420
         USE_IPV6=1
+        DNS_SERVER="8.8.8.8, 8.8.4.4"  # افتراضي للوضع الافتراضي
     else
         read -p "أدخل المنفذ [$WG_PORT]: " port
         WG_PORT=${port:-$WG_PORT}
@@ -189,17 +190,23 @@ setup_server() {
             n|N) USE_IPV6=0 ;;
             *) USE_IPV6=1 ;;
         esac
+        select_dns  # استدعاء اختيار DNS في الوضع الاختياري
     fi
     detect_interface
-    wg genkey | tee /etc/wireguard/server.key | wg pubkey > /etc/wireguard/server.pub
-    SERVER_PRIVATE=$(cat /etc/wireguard/server.key)
+    TEMP_KEY=$(mktemp)
+    wg genkey > "$TEMP_KEY"
+    SERVER_PRIVATE=$(cat "$TEMP_KEY")
+    echo "$SERVER_PRIVATE" | wg pubkey > /etc/wireguard/server.pub
     SERVER_PUBLIC=$(cat /etc/wireguard/server.pub)
+    mv "$TEMP_KEY" /etc/wireguard/server.key
+    chmod 600 /etc/wireguard/server.key /etc/wireguard/server.pub
     if [[ $USE_IPV6 -eq 1 ]]; then
         IPV6_ADDRESS="${IPV6_RANGE}1/64"
     else
         IPV6_ADDRESS=""
     fi
-    cat > "$WG_CONFIG" <<EOF
+    TEMP_CONFIG=$(mktemp)
+    cat > "$TEMP_CONFIG" <<EOF
 [Interface]
 PrivateKey = $SERVER_PRIVATE
 Address = $IPV4_RANGE.1/24${IPV6_ADDRESS:+, $IPV6_ADDRESS}
@@ -208,7 +215,8 @@ MTU = $MTU
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
 EOF
-    chmod 600 "$WG_CONFIG"
+    chmod 600 "$TEMP_CONFIG"
+    mv "$TEMP_CONFIG" "$WG_CONFIG"
 }
 
 add_client() {
@@ -226,11 +234,19 @@ add_client() {
         msg "error" "العنوان $client_ip مستخدم"
         return
     fi
-    wg genkey | tee "$CLIENT_DIR/$client_name.key" | wg pubkey > "$CLIENT_DIR/$client_name.pub"
-    wg genpsk > "$CLIENT_DIR/$client_name.psk"
-    CLIENT_PRIVATE=$(cat "$CLIENT_DIR/$client_name.key")
-    CLIENT_PUBLIC=$(cat "$CLIENT_DIR/$client_name.pub")
-    CLIENT_PSK=$(cat "$CLIENT_DIR/$client_name.psk")
+    TEMP_KEY=$(mktemp)
+    TEMP_PUB=$(mktemp)
+    TEMP_PSK=$(mktemp)
+    wg genkey > "$TEMP_KEY"
+    cat "$TEMP_KEY" | wg pubkey > "$TEMP_PUB"
+    wg genpsk > "$TEMP_PSK"
+    CLIENT_PRIVATE=$(cat "$TEMP_KEY")
+    CLIENT_PUBLIC=$(cat "$TEMP_PUB")
+    CLIENT_PSK=$(cat "$TEMP_PSK")
+    mv "$TEMP_KEY" "$CLIENT_DIR/$client_name.key"
+    mv "$TEMP_PUB" "$CLIENT_DIR/$client_name.pub"
+    mv "$TEMP_PSK" "$CLIENT_DIR/$client_name.psk"
+    chmod 600 "$CLIENT_DIR/$client_name.key" "$CLIENT_DIR/$client_name.pub" "$CLIENT_DIR/$client_name.psk"
     if [[ $USE_IPV6 -eq 1 ]]; then
         CLIENT_IPV6="${IPV6_RANGE}$((RANDOM % 1000 + 2))/128"
         CLIENT_IPV6_SUBNET="${IPV6_RANGE}$((RANDOM % 1000 + 2))/64"
@@ -250,7 +266,8 @@ add_client() {
         KEEPALIVE=${keepalive:-$KEEPALIVE}
     fi
     SERVER_PUBLIC=$(cat /etc/wireguard/server.pub)
-    cat > "$CLIENT_DIR/$client_name.conf" <<EOF
+    TEMP_CLIENT=$(mktemp)
+    cat > "$TEMP_CLIENT" <<EOF
 [Interface]
 PrivateKey = $CLIENT_PRIVATE
 Address = $client_ip/24${CLIENT_IPV6_SUBNET:+, $CLIENT_IPV6_SUBNET}
@@ -264,8 +281,12 @@ Endpoint = $PUBLIC_IP:$WG_PORT
 AllowedIPs = 0.0.0.0/0${USE_IPV6:+, ::/0}
 PersistentKeepalive = $KEEPALIVE
 EOF
-    chmod 600 "$CLIENT_DIR/$client_name.conf"
+    chmod 600 "$TEMP_CLIENT"
+    mv "$TEMP_CLIENT" "$CLIENT_DIR/$client_name.conf"
     systemctl restart wg-quick@wg0
+    if ! systemctl is-active wg-quick@wg0 >/dev/null; then
+        msg "error" "فشل تشغيل الخدمة\n$(systemctl status wg-quick@wg0.service)"
+    fi
     qrencode -t ansiutf8 < "$CLIENT_DIR/$client_name.conf"
     msg "success" "تم إضافة $client_name، التكوين في $CLIENT_DIR/$client_name.conf"
 }
@@ -408,7 +429,6 @@ else
                 detect_public_ip
                 setup_firewall
                 optimize_sysctl
-                select_dns
                 setup_server
                 systemctl enable wg-quick@wg0
                 systemctl start wg-quick@wg0 || msg "error" "فشل تشغيل الخدمة\n$(systemctl status wg-quick@wg0.service)"
