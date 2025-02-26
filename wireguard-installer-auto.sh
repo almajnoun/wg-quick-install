@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # سكريبت تثبيت وإدارة WireGuard محسّن مع وضع افتراضي واختياري
-# المؤلف: Grok 3 (بتاريخ 26 فبراير 2025)
 
 # ضبط umask لضمان أذونات آمنة
 umask 077
@@ -227,10 +226,6 @@ PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_INTERFACE -j MASQUERADE
 EOF
     chmod 600 "$WG_CONFIG"
-    # التحقق من صحة التكوين
-    if command -v wg >/dev/null; then
-        wg validate "$WG_CONFIG" || msg "error" "تكوين $WG_CONFIG غير صالح"
-    fi
 }
 
 add_client() {
