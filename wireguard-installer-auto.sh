@@ -86,6 +86,8 @@ install_deps() {
         "fedora") dnf install -y wireguard-tools qrencode iptables iproute ;;
         "opensuse") zypper install -y wireguard-tools qrencode iptables iproute2 ;;
     esac
+    mkdir -p /etc/wireguard
+    chmod 700 /etc/wireguard
     echo -e "${GREEN}تم تثبيت الحزم بنجاح [========>]${NC}"
 }
 
@@ -180,6 +182,8 @@ setup_server() {
         read -p "أدخل MTU [$MTU]: " mtu_input
         MTU=${mtu_input:-$MTU}
     fi
+    mkdir -p /etc/wireguard
+    chmod 700 /etc/wireguard
     wg genkey | tee /etc/wireguard/server_privatekey | wg pubkey > /etc/wireguard/server_publickey
     [[ -s /etc/wireguard/server_privatekey ]] || msg "error" "فشل إنشاء مفتاح الخادم"
     SERVER_PRIVATE=$(cat /etc/wireguard/server_privatekey)
