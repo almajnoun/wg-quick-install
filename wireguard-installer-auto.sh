@@ -101,7 +101,7 @@ DNS_DEFAULT="8.8.8.8, 8.8.4.4"
 KEEPALIVE_DEFAULT=25
 ENDPOINT_IP=""
 ENDPOINT_NAME=""
-PORT_DEFAULT=51820
+PORT_NUM=$PORT_DEFAULT  # Initialize PORT_NUM with default value
 FIRST_USER="user"
 AUTO_SETUP=0
 ADD_USER=0
@@ -271,7 +271,7 @@ set_port() {
             PORT_NUM="${port_input:-51820}"
         done
     else
-        PORT_NUM="${PORT_NUM:-51820}"
+        PORT_NUM="${PORT_NUM:-$PORT_DEFAULT}"
     fi
     echo -e "${BLUE}Using Port: $PORT_NUM${NC}"
 }
@@ -585,6 +585,11 @@ main() {
     verify_system_version
     check_container_env
 
+    # Ensure PORT_NUM is set before proceeding with setup
+    if [ "$AUTO_SETUP" = 1 ] || [ -z "$PORT_NUM" ]; then
+        set_port
+    fi
+
     if [ "$ADD_USER" = 1 ]; then
         sanitize_name
         choose_dns
@@ -600,7 +605,6 @@ main() {
     elif [ "$AUTO_SETUP" = 1 ]; then
         welcome_message
         fetch_endpoint
-        set_port
         set_ip_version
         choose_dns
         setup_packages
@@ -631,7 +635,7 @@ main() {
         else
             welcome_message
             fetch_endpoint
-            set_port
+            set_port  # Ensure port is set during initial setup
             set_ip_version
             set_initial_user
             choose_dns
