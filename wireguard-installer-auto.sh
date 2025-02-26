@@ -1,56 +1,60 @@
 #!/bin/bash
 
-# WireGuard Auto Deployer Script
-# Enhanced VPN setup tool with secure configuration and DNS flexibility
-# GitHub: https://github.com/almajnoun/wireguard-installer-auto
-# Created by Almajnoun with contributions from Grok 3 (xAI)
-# Licensed under MIT - 2025
+# Script for automating WireGuard VPN deployment
+# Designed for easy setup and user management on Linux systems
+# Repository: https://github.com/almajnoun/wireguard-installer-auto
+# Developed by Almajnoun, enhanced with Grok 3 (xAI)
+# MIT License - 2025
 
-# Set strict permissions
+# Ensure secure file creation
 umask 077
 
-# Color definitions
+# Define terminal colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Error handling
+# Functions to handle errors and exits
 fail() { echo -e "${RED}Error: $1${NC}" >&2; exit 1; }
-fail_apt() { fail "Failed to install packages with apt-get."; }
-fail_yum() { fail "Failed to install packages with yum."; }
-fail_zypper() { fail "Failed to install packages with zypper."; }
+fail_apt() { fail "Package installation via apt-get encountered an issue."; }
+fail_yum() { fail "Unable to install packages using yum."; }
+fail_zypper() { fail "Zypper package installation failed."; }
 
-# Utility functions
+# Helper functions for validation
 is_valid_ip() {
-    local ip_regex='^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'
-    echo "$1" | grep -Eq "$ip_regex"
+    local ip_check='^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'
+    echo "$1" | grep -Eq "$ip_check"
 }
 
 is_private_ip() {
-    local private_regex='^(10|127|172\.(1[6-9]|2[0-9]|3[0-1])|192\.168|169\.254)\.'
-    echo "$1" | grep -Eq "$private_regex"
+    local priv_ip='^(10|127|172\.(1[6-9]|2[0-9]|3[0-1])|192\.168|169\.254)\.'
+    echo "$1" | grep -Eq "$priv_ip"
 }
 
 is_valid_domain() {
-    local domain_regex='^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
-    echo "$1" | grep -Eq "$domain_regex"
+    local domain_check='^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+    echo "$1" | grep -Eq "$domain_check"
 }
 
 check_privileges() {
-    [ "$(id -u)" -ne 0 ] && fail "Run this script as root using 'sudo'."
+    # Verify the script runs with root privileges
+    [ "$(id -u)" -ne 0 ] && fail "This script requires root access. Use 'sudo'."
 }
 
 verify_shell() {
-    readlink /proc/$$/exe | grep -q "dash" && fail "Use 'bash' to run this script, not 'sh'."
+    # Ensure the script is executed with bash
+    readlink /proc/$$/exe | grep -q "dash" && fail "Execute with 'bash', not 'sh'."
 }
 
 validate_kernel() {
-    [ "$(uname -r | cut -d '.' -f 1)" -eq 2 ] && fail "Old kernel detected. Update your system."
+    # Check for outdated kernel versions
+    [ "$(uname -r | cut -d '.' -f 1)" -eq 2 ] && fail "Your kernel is too old for WireGuard."
 }
 
 detect_system() {
+    # Identify the operating system and version
     if grep -qs "ubuntu" /etc/os-release; then
         SYS_TYPE="ubuntu"
         SYS_VER=$(grep 'VERSION_ID' /etc/os-release | cut -d '"' -f 2 | tr -d '.')
@@ -67,25 +71,28 @@ detect_system() {
         SYS_TYPE="openSUSE"
         SYS_VER=$(tail -1 /etc/SUSE-brand | grep -oE '[0-9\\.]+')
     else
-        fail "Unsupported system. Compatible with Ubuntu, Debian, CentOS, Fedora, and openSUSE."
+        fail "Your system is not supported. Use Ubuntu, Debian, CentOS, Fedora, or openSUSE."
     fi
 }
 
 verify_system_version() {
-    [ "$SYS_TYPE" = "ubuntu" ] && [ "$SYS_VER" -lt 2004 ] && fail "Ubuntu 20.04+ required."
-    [ "$SYS_TYPE" = "debian" ] && [ "$SYS_VER" -lt 11 ] && fail "Debian 11+ required."
-    [ "$SYS_TYPE" = "centos" ] && [ "$SYS_VER" -lt 8 ] && fail "CentOS 8+ required."
+    # Validate minimum OS version requirements
+    [ "$SYS_TYPE" = "ubuntu" ] && [ "$SYS_VER" -lt 2004 ] && fail "Requires Ubuntu 20.04 or newer."
+    [ "$SYS_TYPE" = "debian" ] && [ "$SYS_VER" -lt 11 ] && fail "Requires Debian 11 or newer."
+    [ "$SYS_TYPE" = "centos" ] && [ "$SYS_VER" -lt 8 ] && fail "Requires CentOS 8 or newer."
 }
 
 check_container_env() {
-    systemd-detect-virt -cq 2>/dev/null && fail "Running in a container is not supported."
+    # Detect if running inside a container
+    systemd-detect-virt -cq 2>/dev/null && fail "Containers are not supported for this setup."
 }
 
 sanitize_name() {
+    # Clean input name for safe usage
     SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[^0-9a-zA-Z_-]/_/g' | cut -c-15)
 }
 
-# Configuration defaults
+# Default settings with initialized variables
 VPN_CONFIG="/etc/wireguard/wg0.conf"
 USER_DIR="$HOME/wireguard-users"
 VPN_IPV4="10.7.0"
@@ -97,8 +104,15 @@ ENDPOINT_NAME=""
 PORT_DEFAULT=51820
 FIRST_USER="user"
 ENABLE_IPV6=1
+AUTO_SETUP=0
+ADD_USER=0
+LIST_USERS=0
+DEL_USER=0
+SHOW_QR=0
+UNINSTALL=0
+CONFIRM_YES=0
 
-# Parse command-line arguments
+# Parse command-line flags
 parse_options() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -115,36 +129,38 @@ parse_options() {
             --dns-secondary) DNS_SEC="$2"; shift 2 ;;
             -y|--confirm) CONFIRM_YES=1; shift ;;
             -h|--info) display_help; exit 0 ;;
-            *) display_help "Invalid option: $1"; exit 1 ;;
+            *) display_help "Unrecognized flag: $1"; exit 1 ;;
         esac
     done
 }
 
 validate_options() {
-    [ "$AUTO_SETUP" = 1 ] && [ -e "$VPN_CONFIG" ] && fail "Cannot use '--quick' when WireGuard is already installed."
-    [ "$(($ADD_USER + $LIST_USERS + $DEL_USER + $SHOW_QR))" -gt 1 ] && fail "Use only one of '--new-user', '--show-users', '--delete-user', or '--get-qr'."
-    [ "$UNINSTALL" = 1 ] && [ "$(($ADD_USER + $LIST_USERS + $DEL_USER + $SHOW_QR + $AUTO_SETUP))" -gt 0 ] && fail "'--remove' cannot be combined with other flags."
+    # Validate command-line options
+    [ "$AUTO_SETUP" = 1 ] && [ -e "$VPN_CONFIG" ] && fail "Cannot use '--quick' with existing WireGuard setup."
+    [ "$(($ADD_USER + $LIST_USERS + $DEL_USER + $SHOW_QR))" -gt 1 ] && fail "Only one action flag is allowed at a time."
+    [ "$UNINSTALL" = 1 ] && [ "$(($ADD_USER + $LIST_USERS + $DEL_USER + $SHOW_QR + $AUTO_SETUP))" -gt 0 ] && fail "'--remove' cannot be used with other actions."
     if [ ! -e "$VPN_CONFIG" ]; then
-        local msg="WireGuard must be installed first to"
-        [ "$ADD_USER" = 1 ] && fail "$msg add a user."
-        [ "$LIST_USERS" = 1 ] && fail "$msg list users."
-        [ "$DEL_USER" = 1 ] && fail "$msg delete a user."
-        [ "$SHOW_QR" = 1 ] && fail "$msg show a QR code."
-        [ "$UNINSTALL" = 1 ] && fail "Nothing to uninstall. WireGuard is not set up."
+        local pre_msg="WireGuard setup is required before you can"
+        [ "$ADD_USER" = 1 ] && fail "$pre_msg create a new user."
+        [ "$LIST_USERS" = 1 ] && fail "$pre_msg display user list."
+        [ "$DEL_USER" = 1 ] && fail "$pre_msg remove a user."
+        [ "$SHOW_QR" = 1 ] && fail "$pre_msg generate a QR code."
+        [ "$UNINSTALL" = 1 ] && fail "No WireGuard installation to remove."
     fi
-    [ "$ADD_USER" = 1 ] && sanitize_name && [ -z "$SAFE_NAME" ] && fail "User name must be alphanumeric with '-' or '_' only."
-    [ "$DEL_USER" = 1 ] || [ "$SHOW_QR" = 1 ] && sanitize_name && { [ -z "$SAFE_NAME" ] || ! grep -q "^# BEGIN_PEER $SAFE_NAME$" "$VPN_CONFIG"; } && fail "Invalid or non-existent user name."
-    [ -n "$ENDPOINT_NAME" ] && ! { is_valid_domain "$ENDPOINT_NAME" || is_valid_ip "$ENDPOINT_NAME"; } && fail "Endpoint must be a valid domain or IPv4 address."
+    [ "$ADD_USER" = 1 ] && sanitize_name && [ -z "$SAFE_NAME" ] && fail "User name must use letters, numbers, '-', or '_' only."
+    [ "$DEL_USER" = 1 ] || [ "$SHOW_QR" = 1 ] && sanitize_name && { [ -z "$SAFE_NAME" ] || ! grep -q "^# BEGIN_PEER $SAFE_NAME$" "$VPN_CONFIG"; } && fail "User name is invalid or does not exist."
+    [ -n "$ENDPOINT_NAME" ] && ! { is_valid_domain "$ENDPOINT_NAME" || is_valid_ip "$ENDPOINT_NAME"; } && fail "Endpoint must be a valid domain or IP address."
     [ -n "$PORT_NUM" ] && { [[ ! "$PORT_NUM" =~ ^[0-9]+$ || "$PORT_NUM" -gt 65535 ]]; } && fail "Port must be a number between 1 and 65535."
-    [ -n "$DNS_PRI" ] && ! is_valid_ip "$DNS_PRI" && fail "Primary DNS must be a valid IP."
-    [ -n "$DNS_SEC" ] && ! is_valid_ip "$DNS_SEC" && fail "Secondary DNS must be a valid IP."
-    [ -z "$DNS_PRI" ] && [ -n "$DNS_SEC" ] && fail "Specify --dns-primary with --dns-secondary."
+    [ -n "$DNS_PRI" ] && ! is_valid_ip "$DNS_PRI" && fail "Primary DNS must be a valid IP address."
+    [ -n "$DNS_SEC" ] && ! is_valid_ip "$DNS_SEC" && fail "Secondary DNS must be a valid IP address."
+    [ -z "$DNS_PRI" ] && [ -n "$DNS_SEC" ] && fail "Primary DNS is required if secondary DNS is specified."
     DNS_SET="$DNS_DEFAULT"
     [ -n "$DNS_PRI" ] && [ -n "$DNS_SEC" ] && DNS_SET="$DNS_PRI, $DNS_SEC"
     [ -n "$DNS_PRI" ] && [ -z "$DNS_SEC" ] && DNS_SET="$DNS_PRI"
 }
 
 display_help() {
+    # Show usage instructions
     [ -n "$1" ] && echo -e "${RED}Error: $1${NC}" >&2
     cat <<EOF
 WireGuard Auto Deployer
@@ -175,29 +191,31 @@ EOF
 }
 
 welcome_message() {
+    # Display initial greeting
     if [ "$AUTO_SETUP" = 0 ]; then
-        echo -e "${GREEN}Welcome to WireGuard Auto Deployer!${NC}"
-        echo "Answer a few questions to begin setup."
-        echo "Press Enter to accept defaults."
+        echo -e "${GREEN}WireGuard Auto Deployer Setup${NC}"
+        echo "Please provide some details to configure your VPN."
+        echo "Hit Enter to use the suggested settings."
     else
-        echo -e "${BLUE}Starting VPN deployment with $([ -n "$ENDPOINT_NAME" ] || [ -n "$PORT_NUM" ] || [ -n "$FIRST_USER" ] || [ -n "$DNS_PRI" ] && echo "custom" || echo "default") settings.${NC}"
+        echo -e "${BLUE}Deploying VPN with $([ -n "$ENDPOINT_NAME" ] || [ -n "$PORT_NUM" ] || [ -n "$FIRST_USER" ] || [ -n "$DNS_PRI" ] && echo "specified" || echo "default") options.${NC}"
     fi
 }
 
 fetch_endpoint() {
+    # Determine the VPN endpoint
     if [ "$AUTO_SETUP" = 0 ]; then
-        echo -e "\nUse a domain name (e.g., vpn.example.com) instead of IP? [y/N]: "
+        echo -e "\nWould you like to use a domain instead of an IP? [y/N]: "
         read -r choice
         case "$choice" in
             [yY]*) 
-                echo -e "\nEnter the domain name for this VPN:"
+                echo -e "\nProvide the domain name for your VPN:"
                 read -r domain
                 until is_valid_domain "$domain"; do
-                    echo "Invalid domain. Must be a valid FQDN."
+                    echo "Invalid domain name entered."
                     read -r domain
                 done
                 ENDPOINT_IP="$domain"
-                echo -e "${YELLOW}Ensure '$domain' resolves to this server's IP.${NC}"
+                echo -e "${YELLOW}Make sure '$domain' points to this server's IP.${NC}"
                 ;;
             *)
                 detect_ip_address
@@ -209,6 +227,7 @@ fetch_endpoint() {
 }
 
 detect_ip_address() {
+    # Automatically detect server IP
     local ip_count=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | wc -l)
     if [ "$ip_count" -eq 1 ]; then
         ENDPOINT_IP=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}')
@@ -217,33 +236,35 @@ detect_ip_address() {
         if ! is_valid_ip "$ENDPOINT_IP"; then
             ENDPOINT_IP=$(curl -s http://ipv4.icanhazip.com || curl -s http://ip1.dynupdate.no-ip.com)
             if ! is_valid_ip "$ENDPOINT_IP"; then
-                [ "$AUTO_SETUP" = 0 ] && select_ip_manually || fail "Could not detect public IP in auto mode."
+                [ "$AUTO_SETUP" = 0 ] && select_ip_manually || fail "Unable to detect server IP automatically."
             fi
         fi
     fi
-    is_private_ip "$ENDPOINT_IP" && PUBLIC_IP=$(curl -s http://ipv4.icanhazip.com || fail "Cannot detect public IP for NAT.")
+    is_private_ip "$ENDPOINT_IP" && PUBLIC_IP=$(curl -s http://ipv4.icanhazip.com || fail "Failed to detect public IP for NAT.")
 }
 
 select_ip_manually() {
-    echo -e "\nMultiple IPs detected. Choose one:"
+    # Manually select IP if multiple detected
+    echo -e "\nDetected multiple IPs. Pick one:"
     ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | nl -s ') '
-    read -rp "Select IP [1]: " ip_choice
+    read -rp "Choose IP [1]: " ip_choice
     local ip_count=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | wc -l)
     until [[ -z "$ip_choice" || "$ip_choice" =~ ^[0-9]+$ && "$ip_choice" -le "$ip_count" ]]; do
         echo "Invalid choice."
-        read -rp "Select IP [1]: " ip_choice
+        read -rp "Choose IP [1]: " ip_choice
     done
     [ -z "$ip_choice" ] && ip_choice=1
     ENDPOINT_IP=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | sed -n "${ip_choice}p")
 }
 
 set_port() {
+    # Set the VPN port
     if [ "$AUTO_SETUP" = 0 ]; then
-        echo -e "\nEnter the port for WireGuard [51820]:"
+        echo -e "\nSpecify the VPN port [51820]:"
         read -r port_input
         PORT_NUM="${port_input:-51820}"
         until [[ "$PORT_NUM" =~ ^[0-9]+$ && "$PORT_NUM" -le 65535 ]]; do
-            echo "Invalid port."
+            echo "Invalid port number."
             read -r port_input
             PORT_NUM="${port_input:-51820}"
         done
@@ -253,21 +274,22 @@ set_port() {
 }
 
 choose_dns() {
+    # Select DNS servers for VPN users
     if [ "$AUTO_SETUP" = 0 ] || [ "$ADD_USER" = 1 ]; then
-        echo -e "\nSelect DNS for the VPN user:"
-        echo "  1) System DNS"
-        echo "  2) Google (8.8.8.8, 8.8.4.4)"
-        echo "  3) Cloudflare (1.1.1.1, 1.0.0.1)"
+        echo -e "\nPick DNS servers for VPN users:"
+        echo "  1) Use system DNS"
+        echo "  2) Google DNS (8.8.8.8, 8.8.4.4)"
+        echo "  3) Cloudflare DNS (1.1.1.1, 1.0.0.1)"
         echo "  4) OpenDNS (208.67.222.222, 208.67.220.220)"
         echo "  5) Quad9 (9.9.9.9, 149.112.112.112)"
-        echo "  6) AdGuard (94.140.14.14, 94.140.15.15)"
+        echo "  6) AdGuard DNS (94.140.14.14, 94.140.15.15)"
         echo "  7) NextDNS (45.90.28.0, 45.90.30.0)"
         echo "  8) CleanBrowsing (185.228.168.168, 185.228.169.168)"
-        echo "  9) Custom DNS"
-        read -rp "Choice [2]: " dns_opt
+        echo "  9) Enter custom DNS"
+        read -rp "Option [2]: " dns_opt
         until [[ -z "$dns_opt" || "$dns_opt" =~ ^[1-9]$ ]]; do
-            echo "Invalid selection."
-            read -rp "Choice [2]: " dns_opt
+            echo "Invalid option."
+            read -rp "Option [2]: " dns_opt
         done
     else
         dns_opt=2
@@ -284,16 +306,16 @@ choose_dns() {
         7) DNS_SET="45.90.28.0, 45.90.30.0" ;;
         8) DNS_SET="185.228.168.168, 185.228.169.168" ;;
         9)
-            echo "Enter primary DNS:"
+            echo "Provide primary DNS:"
             read -r custom_pri
             until is_valid_ip "$custom_pri"; do
-                echo "Invalid IP."
+                echo "Invalid DNS IP."
                 read -r custom_pri
             done
-            echo "Enter secondary DNS (or press Enter to skip):"
+            echo "Provide secondary DNS (optional, press Enter to skip):"
             read -r custom_sec
             [ -n "$custom_sec" ] && until is_valid_ip "$custom_sec"; do
-                echo "Invalid IP."
+                echo "Invalid DNS IP."
                 read -r custom_sec
             done
             DNS_SET="$custom_pri"
@@ -303,8 +325,9 @@ choose_dns() {
 }
 
 set_initial_user() {
+    # Define the initial VPN user
     if [ "$AUTO_SETUP" = 0 ]; then
-        echo -e "\nName for the first VPN user [user]:"
+        echo -e "\nEnter the first VPN user name [user]:"
         read -r user_input
         FIRST_USER="${user_input:-user}"
         sanitize_name "RAW_NAME=$FIRST_USER"
@@ -314,11 +337,13 @@ set_initial_user() {
 }
 
 prepare_install() {
-    [ "$AUTO_SETUP" = 0 ] && echo -e "\n${BLUE}Ready to deploy WireGuard VPN.${NC}"
+    # Signal readiness for VPN installation
+    [ "$AUTO_SETUP" = 0 ] && echo -e "\n${BLUE}VPN installation is about to start.${NC}"
 }
 
 setup_packages() {
-    echo -e "${YELLOW}Installing required packages...${NC}"
+    # Install necessary software packages
+    echo -e "${YELLOW}Setting up required software...${NC}"
     case "$SYS_TYPE" in
         "ubuntu"|"debian")
             export DEBIAN_FRONTEND=noninteractive
@@ -340,6 +365,7 @@ setup_packages() {
 }
 
 configure_vpn() {
+    # Configure WireGuard VPN server
     TEMP_KEY=$(mktemp)
     wg genkey > "$TEMP_KEY"
     SERVER_KEY=$(cat "$TEMP_KEY")
@@ -358,6 +384,7 @@ EOF
 }
 
 setup_firewall() {
+    # Configure firewall rules for VPN
     local net_if=$(ip route | grep default | awk '{print $5}' | head -1)
     if systemctl is-active --quiet firewalld.service; then
         firewall-cmd --add-port="$PORT_NUM"/udp --permanent
@@ -378,6 +405,7 @@ setup_firewall() {
 }
 
 add_vpn_user() {
+    # Add a new VPN user
     local user_name="${1:-$FIRST_USER}"
     local ip_octet=2
     while grep -q "AllowedIPs = ${VPN_IPV4}.$ip_octet/32" "$VPN_CONFIG"; do
@@ -425,22 +453,26 @@ EOF
 }
 
 start_service() {
+    # Start and enable WireGuard service
     systemctl enable wg-quick@wg0.service
     systemctl start wg-quick@wg0.service || fail "Failed to start VPN service."
 }
 
 complete_setup() {
+    # Confirm successful setup
     echo -e "${GREEN}VPN setup completed successfully!${NC}"
     echo "User config saved to: $USER_DIR/$FIRST_USER.conf"
 }
 
 list_users() {
+    # List all VPN users
     grep '^# BEGIN_PEER' "$VPN_CONFIG" | cut -d ' ' -f 3 | nl -s ') '
     local user_count=$(grep -c '^# BEGIN_PEER' "$VPN_CONFIG")
     echo -e "\nTotal users: $user_count"
 }
 
 remove_user() {
+    # Remove a VPN user
     echo "Select user to remove:"
     list_users
     read -rp "User number: " user_num
@@ -457,6 +489,7 @@ remove_user() {
 }
 
 show_qr_code() {
+    # Display QR code for a VPN user
     echo "Select user for QR code:"
     list_users
     read -rp "User number: " user_num
@@ -472,6 +505,7 @@ show_qr_code() {
 }
 
 uninstall_vpn() {
+    # Uninstall WireGuard and clean up
     systemctl stop wg-quick@wg0
     systemctl disable wg-quick@wg0
     rm -rf /etc/wireguard "$USER_DIR" /etc/sysctl.d/99-vpn.conf
@@ -488,6 +522,7 @@ uninstall_vpn() {
 }
 
 main() {
+    # Main execution flow
     parse_options "$@"
     validate_options
     check_privileges
