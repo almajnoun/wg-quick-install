@@ -5,10 +5,6 @@ This script allows you to easily install and configure **WireGuard** on Debian 1
 
 ## How to use
 
-1. Download the script using the command:
-2. 
-3. bash or
-4. 
 wget https://raw.githubusercontent.com/almajnoun/wireguard-installer-auto/main/wireguard-installer-auto.sh
    
 chmod +x wireguard-installer-auto.sh
