@@ -13,11 +13,21 @@ sudo ./wg-quick-install.sh --quick
 --------------------------------------
 # How to Use 
 
- Initial setup:     sudo ./wg-quick-install.sh --quick
+ Initial setup:  
+ 
+ sudo ./wg-quick-install.sh --quick
 
- Add a user:        sudo ./wg-quick-install.sh --new-peer example
+ Add a user:   
+ 
+ sudo ./wg-quick-install.sh --new-peer example
 
-Interactive and configuration run:   sudo ./wg-quick-install.sh
+Interactive and configuration run:  
+
+sudo ./wg-quick-install.sh
+
+Uninstall WireGuard Completely:
+
+sudo ./wg-quick-install.sh --uninstall
 
 --------------------------------------
 
@@ -56,21 +66,3 @@ Setup Commands (optional):
   --user [name]             Name the first VPN user (default: user)
   --dns-primary [IP]        Primary DNS for the first user
   --dns-secondary [IP]      Secondary DNS for the first user
-
-# Practical Examples
-Deploy with Default Configuration:
-
-sudo ./wg-quick-install.sh --quick
-
-Add a New VPN User:
-
-sudo ./wg-quick-install.sh --new-user newuser
-
-Remove an Existing User:
-
-sudo ./wg-quick-install.sh --delete-user newuser
-
-Uninstall WireGuard Completely:
-
-sudo ./wg-quick-install.sh --uninstall
-  
