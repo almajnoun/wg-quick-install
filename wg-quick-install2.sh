@@ -434,7 +434,7 @@ EOF
     local endpoint_port=$(grep '^ListenPort' "$WG_CONFIG" | cut -d ' ' -f 3)
     [ -z "$endpoint_ip" ] && endpoint_ip="$IP"
     [ -z "$endpoint_port" ] && endpoint_port="$PORT"
-    local temp_conf=$(mktemp)  # ملف مؤقت للتكوين غير المشفر
+    local temp_conf=$(mktemp)
     cat > "$temp_conf" << EOF
 [Interface]
 Address = 10.7.0.$octet/24$( [ -n "$IP6" ] && echo ", fddd:2c4:2c4:2c4::$octet/64" )
@@ -449,6 +449,8 @@ Endpoint = $endpoint_ip:$endpoint_port
 PersistentKeepalive = 25
 EOF
     chmod 600 "$temp_conf"
+    qrencode -t UTF8 < "$temp_conf"
+    echo "Added '$peer_name'. Config at: $out_dir$peer_name.conf${ENCRYPT:+.gpg}"
     if [ "$ENCRYPT" = 1 ]; then
         cp "$temp_conf" "$out_dir$peer_name.conf"
         echo "Enter a passphrase to encrypt $peer_name.conf:"
@@ -459,10 +461,8 @@ EOF
         mv "$temp_conf" "$out_dir$peer_name.conf"
         [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$out_dir$peer_name.conf"
     fi
+    rm -f "$temp_conf"
     wg addconf wg0 <(sed -n "/^# BEGIN $peer_name$/,/^# END $peer_name$/p" "$WG_CONFIG")
-    echo "Added '$peer_name'. Config at: $out_dir$peer_name.conf${ENCRYPT:+.gpg}"
-    qrencode -t UTF8 < "$temp_conf"  # عرض QR من الملف المؤقت غير المشفر
-    rm -f "$temp_conf"  # حذف الملف المؤقت بعد العرض
 }
 
 start_service() {
@@ -526,6 +526,54 @@ show_qr() {
     elif [ -f "$out_dir$peer.conf" ]; then
         qrencode -t UTF8 < "$out_dir$peer.conf"
         echo "QR for '$peer' shown."
+    else
+        abort "Config for '$peer' not found."
+    fi
+}
+
+encrypt_peer() {
+    echo "Select peer to encrypt:"
+    list_peers
+    read -rp "Number: " num
+    local total=$(grep -c '^# BEGIN' "$WG_CONFIG")
+    until [[ "$num" =~ ^[0-9]+$ && "$num" -le "$total" ]]; do
+        echo "Invalid."
+        read -rp "Number: " num
+    done
+    local peer=$(grep '^# BEGIN' "$WG_CONFIG" | cut -d ' ' -f 3 | sed -n "${num}p")
+    local out_dir=~
+    [ -n "$SUDO_USER" ] && [ -d "$(getent passwd "$SUDO_USER" | cut -d: -f6)" ] && out_dir="$(getent passwd "$SUDO_USER" | cut -d: -f6)/"
+    if [ -f "$out_dir$peer.conf.gpg" ]; then
+        echo "Config for '$peer' is already encrypted."
+    elif [ -f "$out_dir$peer.conf" ]; then
+        echo "Enter a passphrase to encrypt $peer.conf:"
+        gpg -c "$out_dir$peer.conf"
+        rm -f "$out_dir$peer.conf"
+        echo "Config encrypted as $out_dir$peer.conf.gpg"
+    else
+        abort "Config for '$peer' not found."
+    fi
+}
+
+decrypt_peer() {
+    echo "Select peer to decrypt:"
+    list_peers
+    read -rp "Number: " num
+    local total=$(grep -c '^# BEGIN' "$WG_CONFIG")
+    until [[ "$num" =~ ^[0-9]+$ && "$num" -le "$total" ]]; do
+        echo "Invalid."
+        read -rp "Number: " num
+    done
+    local peer=$(grep '^# BEGIN' "$WG_CONFIG" | cut -d ' ' -f 3 | sed -n "${num}p")
+    local out_dir=~
+    [ -n "$SUDO_USER" ] && [ -d "$(getent passwd "$SUDO_USER" | cut -d: -f6)" ] && out_dir="$(getent passwd "$SUDO_USER" | cut -d: -f6)/"
+    if [ -f "$out_dir$peer.conf" ]; then
+        echo "Config for '$peer' is already decrypted."
+    elif [ -f "$out_dir$peer.conf.gpg" ]; then
+        gpg -d "$out_dir$peer.conf.gpg" > "$out_dir$peer.conf"
+        [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$out_dir$peer.conf"
+        chmod 600 "$out_dir$peer.conf"
+        echo "Config decrypted to $out_dir$peer.conf"
     else
         abort "Config for '$peer' not found."
     fi
@@ -659,10 +707,12 @@ setup_wg() {
         echo "  2) List peers"
         echo "  3) Remove peer"
         echo "  4) Show QR"
-        echo "  5) Uninstall"
-        echo "  6) Exit"
+        echo "  5) Encrypt a peer config"
+        echo "  6) Decrypt a peer config"
+        echo "  7) Uninstall"
+        echo "  8) Exit"
         read -rp "Option: " opt
-        until [[ "$opt" =~ ^[1-6]$ ]]; do
+        until [[ "$opt" =~ ^[1-8]$ ]]; do
             echo "Invalid choice."
             read -rp "Option: " opt
         done
@@ -671,8 +721,10 @@ setup_wg() {
             2) list_peers ;;
             3) remove_peer ;;
             4) show_qr ;;
-            5) uninstall_wg ;;
-            6) exit 0 ;;
+            5) encrypt_peer ;;
+            6) decrypt_peer ;;
+            7) uninstall_wg ;;
+            8) exit 0 ;;
         esac
     fi
 }
