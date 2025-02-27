@@ -7,18 +7,18 @@ This script allows you to easily install and configure **WireGuard** on Debian 1
 
 wget https://raw.githubusercontent.com/almajnoun/wireguard-installer-auto/refs/heads/main/wg-quick-install.sh
    
-chmod +x wireguard-installer-auto.sh
-sudo ./wireguard-installer-auto.sh --quick
+chmod +x wg-quick-install.sh
+sudo ./wg-quick-install.sh --quick
 
 For automatic setup with custom options:
 
-sudo ./wireguard-installer-auto.sh --quick --user myclient --dns-primary 1.1.1.1 --dns-secondary 1.0.0.1
+sudo ./wg-quick-install.sh --quick --user myclient --dns-primary 1.1.1.1 --dns-secondary 1.0.0.1
 
 How to Use
 Step-by-Step Mode
 Run the script without any arguments to enter an interactive setup:
 
-sudo ./wireguard-installer-auto.sh
+sudo ./wg-quick-install.sh
 
 Options Available:
 Quick Setup: Automatically installs WireGuard with default configurations.
@@ -50,17 +50,17 @@ Setup Commands (optional):
 Practical Examples
 Deploy with Default Configuration:
 
-sudo ./wireguard-installer-auto.sh --quick
+sudo ./wg-quick-install.sh --quick
 
 Add a New VPN User:
 
-sudo ./wireguard-installer-auto.sh --new-user newuser
+sudo ./wg-quick-install.sh --new-user newuser
 
 Remove an Existing User:
 
-sudo ./wireguard-installer-auto.sh --delete-user newuser
+sudo ./wg-quick-install.sh --delete-user newuser
 
 Uninstall WireGuard Completely:
 
-sudo ./wireguard-installer-auto.sh --wipe
+sudo ./wg-quick-install.sh --wipe
   
