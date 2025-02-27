@@ -2,8 +2,8 @@
 
 # WireGuard Quick Install Script
 # Fast setup for WireGuard VPN servers
-# Source: https://github.com/almajnoun/wireguard-installer-auto
-# By Almajnoun, optimized with Grok 3 (xAI)
+# Source: https://github.com/almajnoun/wg-quick-install2
+# By Almajnoun
 # MIT License - 2025
 
 abort() { echo "Error: $1" >&2; exit 1; }
