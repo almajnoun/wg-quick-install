@@ -12,11 +12,11 @@ sudo ./wg-quick-install.sh --quick
 --------------------------------------
 # How to Use 
 
-# Initial setup:     sudo ./wg-quick-install.sh --quick
+ Initial setup:     sudo ./wg-quick-install.sh --quick
 
-# Add a user:        sudo ./wg-quick-install.sh --new-peer example
+ Add a user:        sudo ./wg-quick-install.sh --new-peer example
 
-# Interactive and configuration run:   sudo ./wg-quick-install.sh
+Interactive and configuration run:   sudo ./wg-quick-install.sh
 
 --------------------------------------
 
@@ -24,18 +24,18 @@ sudo ./wg-quick-install.sh --quick
 
 sudo ./wg-quick-install.sh --quick --user myclient --dns-primary 1.1.1.1 --dns-secondary 1.0.0.1
 
-# Step-by-Step Mode
-# Run the script without any arguments to enter an interactive setup:
+Step-by-Step Mode
+ Run the script without any arguments to enter an interactive setup:
 
 sudo ./wg-quick-install.sh
 
 # Options Available:
-# Quick Setup: Automatically installs WireGuard with default configurations.
-# Custom Setup: Allows you to specify server details, ports, user names, and DNS servers.
-# Follow the on-screen instructions to complete the process.
-# Available Commands
+ Quick Setup: Automatically installs WireGuard with default configurations.
+ Custom Setup: Allows you to specify server details, ports, user names, and DNS servers.
+ Follow the on-screen instructions to complete the process.
+ Available Commands
 
-# Usage: sudo ./wireguard-installer-auto.sh [commands]
+ Usage: sudo ./wireguard-installer-auto.sh [commands]
 
 Commands:
   --new-user [name]         Create a new VPN user
@@ -56,7 +56,7 @@ Setup Commands (optional):
   --dns-primary [IP]        Primary DNS for the first user
   --dns-secondary [IP]      Secondary DNS for the first user
 
-Practical Examples
+# Practical Examples
 Deploy with Default Configuration:
 
 sudo ./wg-quick-install.sh --quick
