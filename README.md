@@ -63,5 +63,5 @@ sudo ./wg-quick-install.sh --delete-user newuser
 
 Uninstall WireGuard Completely:
 
-sudo ./wg-quick-install.sh --wipe
+sudo ./wg-quick-install.sh --uninstall
   
