@@ -4,7 +4,7 @@ This script allows you to easily install and configure **WireGuard** on Debian 1
 
 # install
 
-wget https://raw.githubusercontent.com/almajnoun/wireguard-installer-auto/refs/heads/main/wg-quick-install.sh
+wget https://github.com/almajnoun/wg-quick-install/raw/refs/heads/main/wg-quick-install.sh
    
 chmod +x wg-quick-install.sh
 
