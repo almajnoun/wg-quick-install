@@ -543,7 +543,9 @@ encrypt_peer() {
     local peer=$(grep '^# BEGIN' "$WG_CONFIG" | cut -d ' ' -f 3 | sed -n "${num}p")
     local out_dir=~
     [ -n "$SUDO_USER" ] && [ -d "$(getent passwd "$SUDO_USER" | cut -d: -f6)" ] && out_dir="$(getent passwd "$SUDO_USER" | cut -d: -f6)/"
-    if [ -f "$out_dir$peer.conf.gpg" ]; then
+    if [ -z "$peer" ]; then
+        abort "No peer selected."
+    elif [ -f "$out_dir$peer.conf.gpg" ]; then
         echo "Config for '$peer' is already encrypted."
     elif [ -f "$out_dir$peer.conf" ]; then
         echo "Enter a passphrase to encrypt $peer.conf:"
@@ -551,7 +553,7 @@ encrypt_peer() {
         rm -f "$out_dir$peer.conf"
         echo "Config encrypted as $out_dir$peer.conf.gpg"
     else
-        abort "Config for '$peer' not found."
+        abort "Config file '$out_dir$peer.conf' not found."
     fi
 }
 
