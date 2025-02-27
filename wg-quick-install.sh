@@ -290,6 +290,58 @@ set_first_peer() {
     echo "First Peer: $FIRST_PEER"
 }
 
+pick_dns_servers() {
+    if [ "$QUICK" = 0 ]; then
+        echo -e "\nChoose DNS server for the peer:"
+        echo "  1) System resolvers"
+        echo "  2) Google DNS (default)"
+        echo "  3) Cloudflare DNS"
+        echo "  4) OpenDNS"
+        echo "  5) Quad9"
+        echo "  6) AdGuard DNS"
+        echo "  7) Custom"
+        read -rp "DNS [2]: " dns_opt
+        until [[ -z "$dns_opt" || "$dns_opt" =~ ^[1-7]$ ]]; do
+            echo "Invalid selection."
+            read -rp "DNS [2]: " dns_opt
+        done
+    else
+        dns_opt=2
+    fi
+    case "$dns_opt" in
+        1)
+            if grep '^nameserver' "/etc/resolv.conf" | grep -qv '127.0.0.53'; then
+                resolv="/etc/resolv.conf"
+            else
+                resolv="/run/systemd/resolve/resolv.conf"
+            fi
+            DNS=$(grep -v '^#\|^;' "$resolv" | grep '^nameserver' | grep -v '127.0.0.53' | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | xargs | sed 's/ /, /g')
+            ;;
+        2|"") DNS="8.8.8.8, 8.8.4.4" ;;
+        3) DNS="1.1.1.1, 1.0.0.1" ;;
+        4) DNS="208.67.222.222, 208.67.220.220" ;;
+        5) DNS="9.9.9.9, 149.112.112.112" ;;
+        6) DNS="94.140.14.14, 94.140.15.15" ;;
+        7)
+            echo "Enter primary DNS:"
+            read -r dns1
+            until valid_ip "$dns1"; do
+                echo "Invalid DNS."
+                read -r dns1
+            done
+            echo "Enter secondary DNS (optional):"
+            read -r dns2
+            [ -n "$dns2" ] && until valid_ip "$dns2"; do
+                echo "Invalid DNS."
+                read -r dns2
+            done
+            DNS="$dns1"
+            [ -n "$dns2" ] && DNS="$dns1, $dns2"
+            ;;
+    esac
+    echo "DNS: $DNS"
+}
+
 prep_setup() {
     echo -e "\nInstalling WireGuard..."
 }
@@ -501,6 +553,7 @@ install_wg() {
         choose_port
         check_ipv6
         set_first_peer
+        pick_dns_servers
         add_new_peer "$PEER"
         echo -e "\nQR code above."
         echo "Peer '$PEER' added."
