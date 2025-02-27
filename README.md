@@ -2,32 +2,40 @@
 
 This script allows you to easily install and configure **WireGuard** on Debian 12, Ubuntu 20.04 and later, and CentOS 8 and later systems.
 
-
-## How to use
+# install
 
 wget https://raw.githubusercontent.com/almajnoun/wireguard-installer-auto/refs/heads/main/wg-quick-install.sh
    
 chmod +x wg-quick-install.sh
-
 sudo ./wg-quick-install.sh --quick
 
-For automatic setup with custom options:
+--------------------------------------
+# How to Use 
+
+# Initial setup:     sudo ./wg-quick-install.sh --quick
+
+# Add a user:        sudo ./wg-quick-install.sh --new-peer example
+
+# Interactive and configuration run:   sudo ./wg-quick-install.sh
+
+--------------------------------------
+
+# For automatic setup with custom options:
 
 sudo ./wg-quick-install.sh --quick --user myclient --dns-primary 1.1.1.1 --dns-secondary 1.0.0.1
 
-How to Use
-Step-by-Step Mode
-Run the script without any arguments to enter an interactive setup:
+# Step-by-Step Mode
+# Run the script without any arguments to enter an interactive setup:
 
 sudo ./wg-quick-install.sh
 
-Options Available:
-Quick Setup: Automatically installs WireGuard with default configurations.
-Custom Setup: Allows you to specify server details, ports, user names, and DNS servers.
-Follow the on-screen instructions to complete the process.
-Available Commands
+# Options Available:
+# Quick Setup: Automatically installs WireGuard with default configurations.
+# Custom Setup: Allows you to specify server details, ports, user names, and DNS servers.
+# Follow the on-screen instructions to complete the process.
+# Available Commands
 
-Usage: sudo ./wireguard-installer-auto.sh [commands]
+# Usage: sudo ./wireguard-installer-auto.sh [commands]
 
 Commands:
   --new-user [name]         Create a new VPN user
