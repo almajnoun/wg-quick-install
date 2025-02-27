@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # WireGuard Quick Install Script
-# Fast setup for WireGuard VPN servers
+# Fast setup for WireGuard VPN servers and encrypt option
 # Source: https://github.com/almajnoun/wg-quick-install2
-# By Almajnoun
+# By Almajnoun 
 # MIT License - 2025
 
 abort() { echo "Error: $1" >&2; exit 1; }
