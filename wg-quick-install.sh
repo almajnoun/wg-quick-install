@@ -403,7 +403,7 @@ setup_firewall() {
 }
 
 new_peer() {
-    local peer_name="${1:-$FIRST_PEER}"
+    local peer_name="$1"
     local octet=2
     while grep -q "AllowedIPs = 10.7.0.$octet/32" "$WG_CONFIG"; do
         ((octet++))
@@ -424,6 +424,10 @@ EOF
     local server_pub=$(cat /etc/wireguard/server.pub)
     local out_dir=~
     [ -n "$SUDO_USER" ] && [ -d "$(getent passwd "$SUDO_USER" | cut -d: -f6)" ] && out_dir="$(getent passwd "$SUDO_USER" | cut -d: -f6)/"
+    local endpoint_ip=$(grep '^# ENDPOINT' "$WG_CONFIG" | cut -d ' ' -f 3)
+    local endpoint_port=$(grep '^ListenPort' "$WG_CONFIG" | cut -d ' ' -f 3)
+    [ -z "$endpoint_ip" ] && endpoint_ip="$IP"
+    [ -z "$endpoint_port" ] && endpoint_port="$PORT"
     cat > "$out_dir$peer_name.conf" << EOF
 [Interface]
 Address = 10.7.0.$octet/24$( [ -n "$IP6" ] && echo ", fddd:2c4:2c4:2c4::$octet/64" )
@@ -434,7 +438,7 @@ PrivateKey = $key
 PublicKey = $server_pub
 PresharedKey = $psk
 AllowedIPs = 0.0.0.0/0, ::/0
-Endpoint = $([ -n "$PUBLIC_IP" ] && echo "$PUBLIC_IP" || echo "$IP"):$PORT
+Endpoint = $endpoint_ip:$endpoint_port
 PersistentKeepalive = 25
 EOF
     chmod 600 "$out_dir$peer_name.conf"
