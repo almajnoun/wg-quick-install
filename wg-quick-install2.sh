@@ -82,7 +82,7 @@ parse_args() {
             --rm-peer) RM_PEER=1; raw_name="$2"; shift 2 ;;
             --qr-peer) QR_PEER=1; raw_name="$2"; shift 2 ;;
             --uninstall) UNINSTALL=1; shift ;;
-            --encrypt) ENCRYPT=1; shift ;;  # تحسين 3: خيار التشفير
+            --encrypt) ENCRYPT=1; shift ;;
             --addr) SERVER_ADDR="$2"; shift 2 ;;
             --port) PORT="$2"; shift 2 ;;
             --name) FIRST_PEER="$2"; shift 2 ;;
@@ -351,7 +351,7 @@ install_deps() {
     case "$os" in
         "ubuntu"|"debian")
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -y && apt-get install -y wireguard qrencode iptables gnupg || abort_apt  # إضافة gnupg للتشفير
+            apt-get update -y && apt-get install -y wireguard qrencode iptables gnupg || abort_apt
             ;;
         "centos")
             [ "$os_ver" -eq 9 ] && yum install -y epel-release wireguard-tools qrencode iptables gnupg || abort_yum
@@ -434,7 +434,8 @@ EOF
     local endpoint_port=$(grep '^ListenPort' "$WG_CONFIG" | cut -d ' ' -f 3)
     [ -z "$endpoint_ip" ] && endpoint_ip="$IP"
     [ -z "$endpoint_port" ] && endpoint_port="$PORT"
-    cat > "$out_dir$peer_name.conf" << EOF
+    local temp_conf=$(mktemp)  # ملف مؤقت للتكوين غير المشفر
+    cat > "$temp_conf" << EOF
 [Interface]
 Address = 10.7.0.$octet/24$( [ -n "$IP6" ] && echo ", fddd:2c4:2c4:2c4::$octet/64" )
 DNS = $DNS
@@ -447,18 +448,21 @@ AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = $endpoint_ip:$endpoint_port
 PersistentKeepalive = 25
 EOF
-    chmod 600 "$out_dir$peer_name.conf"
-    [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$out_dir$peer_name.conf"
-    # تحسين 3: تشفير ملف التكوين إذا تم تحديد --encrypt
+    chmod 600 "$temp_conf"
     if [ "$ENCRYPT" = 1 ]; then
+        cp "$temp_conf" "$out_dir$peer_name.conf"
         echo "Enter a passphrase to encrypt $peer_name.conf:"
         gpg -c "$out_dir$peer_name.conf"
         rm -f "$out_dir$peer_name.conf"
         echo "Encrypted config saved as $out_dir$peer_name.conf.gpg"
+    else
+        mv "$temp_conf" "$out_dir$peer_name.conf"
+        [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$out_dir$peer_name.conf"
     fi
     wg addconf wg0 <(sed -n "/^# BEGIN $peer_name$/,/^# END $peer_name$/p" "$WG_CONFIG")
     echo "Added '$peer_name'. Config at: $out_dir$peer_name.conf${ENCRYPT:+.gpg}"
-    qrencode -t UTF8 < "$out_dir$peer_name.conf${ENCRYPT:+.gpg}"
+    qrencode -t UTF8 < "$temp_conf"  # عرض QR من الملف المؤقت غير المشفر
+    rm -f "$temp_conf"  # حذف الملف المؤقت بعد العرض
 }
 
 start_service() {
@@ -466,7 +470,7 @@ start_service() {
     systemctl start wg-quick@wg0.service || { systemctl status wg-quick@wg0.service; abort "Service failed."; }
 }
 
-optimize_network() {  # تحسين 5: تفعيل TCP BBR
+optimize_network() {
     if modprobe -q tcp_bbr && [ "$(uname -r | cut -d '.' -f 1-2)" \> "4.19" ]; then
         echo "net.core.default_qdisc=fq" >> /etc/sysctl.d/99-wg.conf
         echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-wg.conf
@@ -580,7 +584,7 @@ setup_wg() {
     RM_PEER=0
     QR_PEER=0
     UNINSTALL=0
-    ENCRYPT=0  # تحسين 3: متغير التشفير
+    ENCRYPT=0
     PUBLIC_IP=""
     SERVER_ADDR=""
     PORT=""
@@ -643,7 +647,7 @@ setup_wg() {
         install_deps
         gen_server_config
         setup_firewall
-        optimize_network  # تحسين 5: تفعيل BBR
+        optimize_network
         new_peer "$FIRST_PEER"
         start_service
         echo -e "\nQR code displayed."
