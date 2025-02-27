@@ -290,6 +290,24 @@ set_first_peer() {
     echo "First Peer: $FIRST_PEER"
 }
 
+set_new_peer_name() {
+    echo -e "\nEnter a name for the new peer:"
+    read -rp "Name: " RAW_NAME
+    [ -z "$RAW_NAME" ] && abort "Peer name cannot be empty."
+    sanitize_name
+    while [ -z "$PEER" ] || grep -q "^# BEGIN $PEER$" "$WG_CONFIG"; do
+        if [ -z "$PEER" ]; then
+            echo "Invalid name. Use alphanumeric, '-' or '_' only."
+        else
+            echo "'$PEER' already exists."
+        fi
+        read -rp "Name: " RAW_NAME
+        [ -z "$RAW_NAME" ] && abort "Peer name cannot be empty."
+        sanitize_name
+    done
+    echo "New Peer: $PEER"
+}
+
 pick_dns_servers() {
     if [ "$QUICK" = 0 ]; then
         echo -e "\nChoose DNS server for the peer:"
@@ -549,10 +567,11 @@ install_wg() {
     if [ "$NEW_PEER" = 1 ]; then
         banner
         sanitize_name
-        pick_address
-        choose_port
-        check_ipv6
-        set_first_peer
+        if [ "$QUICK" = 0 ]; then
+            set_new_peer_name
+        else
+            [ -z "$PEER" ] && PEER="peer"
+        fi
         pick_dns_servers
         add_new_peer "$PEER"
         echo -e "\nQR code above."
@@ -617,7 +636,7 @@ install_wg() {
             read -rp "Choice: " act
         done
         case "$act" in
-            1) pick_dns_servers; add_new_peer; echo -e "\nQR code above."; echo "Peer added." ;;
+            1) set_new_peer_name; pick_dns_servers; add_new_peer "$PEER"; echo -e "\nQR code above."; echo "Peer added." ;;
             2) list_all_peers ;;
             3) del_peer ;;
             4) show_peer_qr ;;
