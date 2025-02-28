@@ -168,13 +168,13 @@ choose_addr() {
         echo -e "\nChoose server address type:"
         echo "  1) Domain (e.g., vpn.example.com)"
         echo "  2) IPv4 (auto-detect if available)"
-        echo "  3) IPv6 (auto-detect if available)"
-        read -rp "Type [2]: " addr_type
+        echo "  3) IPv6 (auto-detect if available, preferred)"
+        read -rp "Type [3]: " addr_type
         until [[ -z "$addr_type" || "$addr_type" =~ ^[1-3]$ ]]; do
             echo "Invalid choice."
-            read -rp "Type [2]: " addr_type
+            read -rp "Type [3]: " addr_type
         done
-        case "${addr_type:-2}" in
+        case "${addr_type:-3}" in  # IPv6 هو الافتراضي الآن
             1)
                 echo -e "\nEnter server domain:"
                 read -r addr
@@ -189,27 +189,34 @@ choose_addr() {
             3) detect_ip 6 ;;
         esac
     else
-        [ -n "$SERVER_ADDR" ] && IP="$SERVER_ADDR" || detect_ip 6
+        [ -n "$SERVER_ADDR" ] && IP="$SERVER_ADDR" || detect_ip 6 # تفضيل IPv6 في الوضع السريع
     fi
     [ -z "$IP" ] && abort "Failed to set server address."
 }
 detect_ip() {
-    local version="${1:-4}"
+    local version="${1:-6}" # تفضيل IPv6 افتراضيًا
     if [ "$version" = "6" ] && ip -6 addr | grep -q 'inet6 [23]'; then
+        # محاولة العثور على عنوان IPv6 عام (global unicast)
         IP=$(ip -6 addr | grep 'inet6 [23]' | grep -v 'fe80' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | head -1)
-        if [ -z "$IP" ] || is_private_ip "$IP"; then
-            IP=$(curl -s http://ip6.icanhazip.com || curl -s http://ipv6.dynupdate6.no-ip.com)
+        if [ -z "$IP" ]; then
+            # جلب عنوان IPv6 العام من الإنترنت إذا لم يكن هناك عنوان محلي عام
+            IP=$(curl -s --max-time 5 http://ip6.icanhazip.com || curl -s --max-time 5 http://ipv6.dynupdate6.no-ip.com)
         fi
-    else
+        if [ -z "$IP" ] || is_private_ip "$IP"; then
+            echo "No global IPv6 detected, falling back to IPv4..."
+            version=4
+        fi
+    fi
+    if [ "$version" = "4" ] || [ -z "$IP" ]; then
         IP=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | head -1)
         if [ -z "$IP" ] || is_private_ip "$IP"; then
-            IP=$(curl -s http://ipv4.icanhazip.com || curl -s http://ip1.dynupdate.no-ip.com)
+            IP=$(curl -s --max-time 5 http://ipv4.icanhazip.com || curl -s --max-time 5 http://ip1.dynupdate.no-ip.com)
         fi
     fi
     if ! valid_ip "$IP"; then
         [ "$QUICK" = 0 ] && pick_ip || abort "Cannot detect server IP."
     fi
-    is_private_ip "$IP" && PUBLIC_IP=$(curl -s "http://ip${version}.icanhazip.com" || abort "Failed to detect public IP.")
+    is_private_ip "$IP" && PUBLIC_IP=$(curl -s --max-time 5 "http://ip${version}.icanhazip.com" || abort "Failed to detect public IP.")
     echo "Server IP: $IP"
     [ -n "$PUBLIC_IP" ] && echo "Public IP (NAT): $PUBLIC_IP"
 }
@@ -244,6 +251,9 @@ check_ipv6() {
     IP6=""
     if ip -6 addr | grep -q 'inet6 [23]'; then
         IP6=$(ip -6 addr | grep 'inet6 [23]' | grep -v 'fe80' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | head -1)
+        if [ -z "$IP6" ]; then
+            IP6=$(curl -s --max-time 5 http://ip6.icanhazip.com || curl -s --max-time 5 http://ipv6.dynupdate6.no-ip.com)
+        fi
     fi
     [ -n "$IP6" ] && echo "IPv6 detected: $IP6"
 }
