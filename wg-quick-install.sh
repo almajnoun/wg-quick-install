@@ -225,13 +225,13 @@ detect_ip() {
     else
         IP=$(ip -4 route get 1 | awk '{print $NF;exit}' 2>/dev/null)
         if ! valid_ip "$IP"; then
-            IP=$(curl -s http://ipv4.icanhazip.com || curl -s http://ip1.dynupdate.no-ip.com)
+            IP=$(timeout 5 curl -s http://ipv4.icanhazip.com || timeout 5 curl -s http://ip1.dynupdate.no-ip.com || timeout 5 curl -s https://api.ipify.org)
             if ! valid_ip "$IP"; then
-                [ "$QUICK" = 0 ] && pick_ip || abort "Cannot detect server IP."
+                [ "$QUICK" = 0 ] && pick_ip || abort "Cannot detect server IP. Check network connectivity."
             fi
         fi
     fi
-    is_private_ip "$IP" && PUBLIC_IP=$(curl -s http://ipv4.icanhazip.com || abort "Failed to detect public IP.")
+    is_private_ip "$IP" && PUBLIC_IP=$(timeout 5 curl -s http://ipv4.icanhazip.com || abort "Failed to detect public IP. Check internet connection.")
     echo "Server IP: $IP"
     [ -n "$PUBLIC_IP" ] && echo "Public IP (NAT): $PUBLIC_IP"
 }
@@ -341,8 +341,16 @@ pick_dns() {
     echo "DNS: $DNS"
 }
 
+check_connectivity() {
+    if ! ping -c 3 8.8.8.8 >/dev/null 2>&1; then
+        abort "No internet connection detected. Please check your network."
+    fi
+}
+
 prep_install() {
-    echo -e "\nInstalling WireGuard..."
+    echo -e "\nChecking connectivity before installation..."
+    check_connectivity
+    echo -e "Installing WireGuard..."
 }
 
 install_deps() {
@@ -384,20 +392,25 @@ EOF
 
 setup_firewall() {
     local net_if=$(ip route | grep default | awk '{print $5}' | head -1)
+    [ -z "$net_if" ] && abort "Cannot detect default network interface."
+    
     if systemctl is-active --quiet firewalld.service; then
-        firewall-cmd --add-port="$PORT"/udp --permanent
+        firewall-cmd --add-port="$PORT"/udp --permanent || abort "Failed to configure firewalld port"
         firewall-cmd --zone=trusted --add-source="10.7.0.0/24" --permanent
         firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j MASQUERADE --permanent
         [ -n "$IP6" ] && firewall-cmd --zone=trusted --add-source="fddd:2c4:2c4:2c4::/64" --permanent
-        firewall-cmd --reload
+        firewall-cmd --reload || abort "Failed to reload firewalld"
     else
-        iptables -A INPUT -p udp --dport "$PORT" -j ACCEPT
-        iptables -A FORWARD -s 10.7.0.0/24 -j ACCEPT
-        iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-        iptables -t nat -A POSTROUTING -s 10.7.0.0/24 -o "$net_if" -j MASQUERADE
-        [ -n "$IP6" ] && ip6tables -t nat -A POSTROUTING -s "fddd:2c4:2c4:2c4::/64" -o "$net_if" -j MASQUERADE
+        iptables -A INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null || abort "Failed to set iptables INPUT rule"
+        iptables -A FORWARD -s 10.7.0.0/24 -j ACCEPT 2>/dev/null
+        iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+        iptables -t nat -A POSTROUTING -s 10.7.0.0/24 -o "$net_if" -j MASQUERADE 2>/dev/null || abort "Failed to set NAT masquerading"
+        [ -n "$IP6" ] && ip6tables -t nat -A POSTROUTING -s "fddd:2c4:2c4:2c4::/64" -o "$net_if" -j MASQUERADE 2>/dev/null
     fi
-    # Optimized sysctl settings for VPN performance
+    
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || abort "Failed to enable IP forwarding"
+    [ -n "$IP6" ] && sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
+    
     cat > /etc/sysctl.d/99-wg.conf << EOF
 net.ipv4.ip_forward=1
 net.core.rmem_max=26214400
@@ -409,7 +422,7 @@ net.ipv4.tcp_mtu_probing=1
 net.core.netdev_max_backlog=2500
 EOF
     [ -n "$IP6" ] && echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-wg.conf
-    sysctl -p /etc/sysctl.d/99-wg.conf
+    sysctl -p /etc/sysctl.d/99-wg.conf >/dev/null 2>&1 || abort "Failed to apply sysctl settings"
 }
 
 new_peer() {
@@ -459,8 +472,11 @@ EOF
 }
 
 start_service() {
-    systemctl enable wg-quick@wg0.service
-    systemctl start wg-quick@wg0.service || { systemctl status wg-quick@wg0.service; abort "Service failed."; }
+    systemctl enable wg-quick@wg0.service >/dev/null 2>&1 || abort "Failed to enable WireGuard service"
+    systemctl start wg-quick@wg0.service >/dev/null 2>&1 || { systemctl status wg-quick@wg0.service; abort "Service failed to start."; }
+    if ! wg show wg0 >/dev/null 2>&1; then
+        abort "WireGuard interface wg0 not active. Check configuration."
+    fi
 }
 
 finish() {
@@ -544,9 +560,11 @@ set_new_peer() {
     echo "New Peer: $peer"
 }
 
-# Main Execution
 setup_wg() {
     export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    command -v ip >/dev/null 2>&1 || abort "Required command 'ip' not found."
+    command -v wg >/dev/null 2>&1 && [ -e "$WG_CONFIG" ] || command -v curl >/dev/null 2>&1 || abort "Required command 'curl' not found."
+    
     root_check
     bash_check
     kernel_check
