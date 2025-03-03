@@ -397,7 +397,17 @@ setup_firewall() {
         iptables -t nat -A POSTROUTING -s 10.7.0.0/24 -o "$net_if" -j MASQUERADE
         [ -n "$IP6" ] && ip6tables -t nat -A POSTROUTING -s "fddd:2c4:2c4:2c4::/64" -o "$net_if" -j MASQUERADE
     fi
-    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wg.conf
+    # Optimized sysctl settings for VPN performance
+    cat > /etc/sysctl.d/99-wg.conf << EOF
+net.ipv4.ip_forward=1
+net.core.rmem_max=26214400
+net.core.wmem_max=26214400
+net.ipv4.tcp_rmem=4096 131072 26214400
+net.ipv4.tcp_wmem=4096 131072 26214400
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_mtu_probing=1
+net.core.netdev_max_backlog=2500
+EOF
     [ -n "$IP6" ] && echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-wg.conf
     sysctl -p /etc/sysctl.d/99-wg.conf
 }
