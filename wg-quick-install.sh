@@ -130,7 +130,7 @@ intro() {
     cat <<'EOF'
 
 Welcome to WireGuard Quick Install!
-https://github.com/almajnoun/wireguard-installer-auto
+https://github.com/almajnoun/wg-quick-install
 
 EOF
 }
