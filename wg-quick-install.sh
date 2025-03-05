@@ -596,20 +596,36 @@ show_qr() {
 }
 
 uninstall_wg() {
-    systemctl disable wg-quick@wg0.service
-    systemctl stop wg-quick@wg0.service
-    rm -rf /etc/wireguard /etc/sysctl.d/99-wg.conf
-    iptables -D INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null
-    iptables -t nat -D POSTROUTING -s "10.7.0.0/24" -j MASQUERADE 2>/dev/null
-    [ -n "$IP6" ] && ip6tables -D INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null
-    [ -n "$IP6" ] && ip6tables -t nat -D POSTROUTING -s "fddd:2c4:2c4:2c4::/64" -j MASQUERADE 2>/dev/null
+    systemctl disable wg-quick@wg0.service >/dev/null 2>&1
+    systemctl stop wg-quick@wg0.service >/dev/null 2>&1
+
+    rm -rf /etc/wireguard
+    rm -f /etc/sysctl.d/99-wg.conf
+    sysctl -w net.ipv4.ip_forward=0 >/dev/null 2>&1
+    [ -n "$IP6" ] && sysctl -w net.ipv6.conf.all.forwarding=0 >/dev/null 2>&1
+
+    local net_if=$(ip route | grep default | awk '{print $5}' | head -1)
+    if [ -n "$net_if" ]; then
+        iptables -D INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null
+        iptables -D FORWARD -s 10.7.0.0/24 -j ACCEPT 2>/dev/null
+        iptables -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+        iptables -t nat -D POSTROUTING -s 10.7.0.0/24 -o "$net_if" -j MASQUERADE 2>/dev/null
+        if [ -n "$IP6" ]; then
+            ip6tables -D INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null
+            ip6tables -D FORWARD -s fddd:2c4:2c4:2c4::/64 -j ACCEPT 2>/dev/null
+            ip6tables -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+            ip6tables -t nat -D POSTROUTING -s fddd:2c4:2c4:2c4::/64 -o "$net_if" -j MASQUERADE 2>/dev/null
+        fi
+    fi
+
     case "$os" in
-        "ubuntu"|"debian") apt-get remove --purge -y wireguard qrencode iptables iproute2 2>/dev/null ;;
-        "centos") yum remove -y wireguard-tools qrencode iptables iproute 2>/dev/null ;;
-        "fedora") dnf remove -y wireguard-tools qrencode iptables iproute 2>/dev/null ;;
-        "openSUSE") zypper remove -y wireguard-tools qrencode iptables iproute2 2>/dev/null ;;
+        "ubuntu"|"debian") apt-get remove --purge -y wireguard wireguard-tools 2>/dev/null ;;
+        "centos") yum remove -y wireguard-tools 2>/dev/null ;;
+        "fedora") dnf remove -y wireguard-tools 2>/dev/null ;;
+        "openSUSE") zypper remove -y wireguard-tools 2>/dev/null ;;
     esac
-    echo "WireGuard removed."
+
+    echo "WireGuard configuration and service removed safely."
 }
 
 set_new_peer() {
