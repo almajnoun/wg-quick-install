@@ -16,6 +16,11 @@ valid_ip() {
     printf '%s' "$1" | tr -d '\n' | grep -Eq "$ip_regex"
 }
 
+valid_ip6() {
+    local ip6_regex='^([0-9a-fA-F]{0,4}:){7}[0-9a-fA-F]{0,4}$|^([0-9a-fA-F]{0,4}:){1,7}:$|^::([0-9a-fA-F]{0,4}:){0,6}[0-9a-fA-F]{0,4}$'
+    printf '%s' "$1" | tr -d '\n' | grep -Eq "$ip6_regex"
+}
+
 is_private_ip() {
     local priv_regex='^(10|127|172\.(1[6-9]|2[0-9]|3[0-1])|192\.168|169\.254)\.'
     printf '%s' "$1" | tr -d '\n' | grep -Eq "$priv_regex"
@@ -108,10 +113,10 @@ validate_args() {
     fi
     [ "$NEW_PEER" = 1 ] && clean_name && [ -z "$peer" ] && abort "Peer name must be alphanumeric with '-' or '_'."
     [ "$RM_PEER" = 1 ] || [ "$QR_PEER" = 1 ] && clean_name && { [ -z "$peer" ] || ! grep -q "^# BEGIN $peer$" "$WG_CONFIG"; } && abort "Invalid or missing peer."
-    [ -n "$SERVER_ADDR" ] && ! { is_fqdn "$SERVER_ADDR" || valid_ip "$SERVER_ADDR"; } && abort "Address must be FQDN or IPv4."
+    [ -n "$SERVER_ADDR" ] && ! { is_fqdn "$SERVER_ADDR" || valid_ip "$SERVER_ADDR" || valid_ip6 "$SERVER_ADDR"; } && abort "Address must be FQDN, IPv4, or IPv6."
     [ -n "$PORT" ] && { [[ ! "$PORT" =~ ^[0-9]+$ || "$PORT" -gt 65535 ]]; } && abort "Port must be 1-65535."
-    [ -n "$DNS1" ] && ! valid_ip "$DNS1" && abort "DNS1 must be valid IP."
-    [ -n "$DNS2" ] && ! valid_ip "$DNS2" && abort "DNS2 must be valid IP."
+    [ -n "$DNS1" ] && ! { valid_ip "$DNS1" || valid_ip6 "$DNS1"; } && abort "DNS1 must be valid IPv4 or IPv6."
+    [ -n "$DNS2" ] && ! { valid_ip "$DNS2" || valid_ip6 "$DNS2"; } && abort "DNS2 must be valid IPv4 or IPv6."
     [ -z "$DNS1" ] && [ -n "$DNS2" ] && abort "DNS1 required with DNS2."
     DNS="8.8.8.8, 8.8.4.4"
     [ -n "$DNS1" ] && [ -n "$DNS2" ] && DNS="$DNS1, $DNS2"
@@ -122,7 +127,7 @@ banner() {
     cat <<'EOF'
 
 WireGuard Quick Install Script
-https://github.com/almajnoun/wireguard-installer-auto
+https://github.com/almajnoun/wg-quick-install
 EOF
 }
 
@@ -138,7 +143,7 @@ EOF
 credits() {
     cat <<'EOF'
 
-By Almajnoun, optimized with Grok 3 (xAI)
+By Almajnoun
 MIT License - 2025
 EOF
 }
@@ -153,8 +158,8 @@ Usage: bash $0 [options]
 
 Options:
   --new-peer [name]     Add a new VPN peer
-  --dns1 [IP]           Primary DNS (default: 8.8.8.8)
-  --dns2 [IP]           Secondary DNS (optional)
+  --dns1 [IP]           Primary DNS (IPv4/IPv6, default: 8.8.8.8)
+  --dns2 [IP]           Secondary DNS (IPv4/IPv6, optional)
   --list-peers          List all peers
   --rm-peer [name]      Remove a peer
   --qr-peer [name]      Show QR code for a peer
@@ -164,11 +169,11 @@ Options:
 
 Setup Options:
   --quick               Quick setup with defaults or customs
-  --addr [DNS/IP]       VPN endpoint (FQDN or IPv4)
+  --addr [DNS/IP]       VPN endpoint (FQDN, IPv4, or IPv6)
   --port [number]       WireGuard port (1-65535, default: 51820)
   --name [name]         First peer name (default: peer)
-  --dns1 [IP]           First peer primary DNS
-  --dns2 [IP]           First peer secondary DNS
+  --dns1 [IP]           First peer primary DNS (IPv4/IPv6)
+  --dns2 [IP]           First peer secondary DNS (IPv4/IPv6)
 
 Run without options for interactive mode.
 EOF
@@ -191,7 +196,7 @@ welcome() {
 dns_notice() {
     cat <<EOF
 
-Note: Ensure '$1' resolves to this server's IPv4.
+Note: Ensure '$1' resolves to this server's IPv4 or IPv6 address.
 EOF
 }
 
@@ -268,7 +273,12 @@ set_port() {
 check_ipv6() {
     IP6=""
     if ip -6 addr | grep -q 'inet6 [23]'; then
-        IP6=$(ip -6 addr | grep 'inet6 [23]' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | head -1)
+        IP6=$(ip -6 addr | grep 'inet6 [23]' | grep -v 'fe80::' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | head -1)
+    fi
+    if [ -z "$IP6" ]; then
+        echo "No global IPv6 detected. Using IPv4 only."
+    else
+        echo "IPv6 detected: $IP6"
     fi
 }
 
@@ -291,13 +301,13 @@ name_first_peer() {
 
 pick_dns() {
     if [ "$QUICK" = 0 ]; then
-        echo -e "\nSelect DNS for the peer:"
+        echo -e "\nSelect DNS for the peer (IPv4/IPv6 support):"
         echo "  1) System resolvers"
-        echo "  2) Google DNS (default)"
-        echo "  3) Cloudflare DNS"
-        echo "  4) OpenDNS"
-        echo "  5) Quad9"
-        echo "  6) AdGuard DNS"
+        echo "  2) Google DNS (IPv4: 8.8.8.8, 8.8.4.4; IPv6: 2001:4860:4860::8888, 2001:4860:4860::8844)"
+        echo "  3) Cloudflare DNS (IPv4: 1.1.1.1, 1.0.0.1; IPv6: 2606:4700:4700::1111, 2606:4700:4700::1001)"
+        echo "  4) OpenDNS (IPv4 only: 208.67.222.222, 208.67.220.220)"
+        echo "  5) Quad9 (IPv4: 9.9.9.9, 149.112.112.112; IPv6: 2620:fe::fe, 2620:fe::9)"
+        echo "  6) AdGuard DNS (IPv4: 94.140.14.14, 94.140.15.15; IPv6: 2a10:50c0::ad1:ff, 2a10:50c0::ad2:ff)"
         echo "  7) Custom"
         read -rp "DNS [2]: " dns_choice
         until [[ -z "$dns_choice" || "$dns_choice" =~ ^[1-7]$ ]]; do
@@ -307,6 +317,7 @@ pick_dns() {
     else
         dns_choice=2
     fi
+
     case "$dns_choice" in
         1)
             if grep '^nameserver' "/etc/resolv.conf" | grep -qv '127.0.0.53'; then
@@ -314,23 +325,37 @@ pick_dns() {
             else
                 resolv="/run/systemd/resolve/resolv.conf"
             fi
-            DNS=$(grep -v '^#\|^;' "$resolv" | grep '^nameserver' | grep -v '127.0.0.53' | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | xargs | sed 's/ /, /g')
+            DNS=$(grep -v '^#\|^;' "$resolv" | grep '^nameserver' | grep -v '127.0.0.53' | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}|([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | xargs | sed 's/ /, /g')
             ;;
-        2|"") DNS="8.8.8.8, 8.8.4.4" ;;
-        3) DNS="1.1.1.1, 1.0.0.1" ;;
-        4) DNS="208.67.222.222, 208.67.220.220" ;;
-        5) DNS="9.9.9.9, 149.112.112.112" ;;
-        6) DNS="94.140.14.14, 94.140.15.15" ;;
+        2|"")
+            DNS="8.8.8.8, 8.8.4.4"
+            [ -n "$IP6" ] && DNS="$DNS, 2001:4860:4860::8888, 2001:4860:4860::8844"
+            ;;
+        3)
+            DNS="1.1.1.1, 1.0.0.1"
+            [ -n "$IP6" ] && DNS="$DNS, 2606:4700:4700::1111, 2606:4700:4700::1001"
+            ;;
+        4)
+            DNS="208.67.222.222, 208.67.220.220"
+            ;;
+        5)
+            DNS="9.9.9.9, 149.112.112.112"
+            [ -n "$IP6" ] && DNS="$DNS, 2620:fe::fe, 2620:fe::9"
+            ;;
+        6)
+            DNS="94.140.14.14, 94.140.15.15"
+            [ -n "$IP6" ] && DNS="$DNS, 2a10:50c0::ad1:ff, 2a10:50c0::ad2:ff"
+            ;;
         7)
-            echo "Primary DNS:"
+            echo "Primary DNS (IPv4 or IPv6):"
             read -r dns1
-            until valid_ip "$dns1"; do
+            until valid_ip "$dns1" || valid_ip6 "$dns1"; do
                 echo "Invalid DNS."
                 read -r dns1
             done
-            echo "Secondary DNS (optional):"
+            echo "Secondary DNS (optional, IPv4 or IPv6):"
             read -r dns2
-            [ -n "$dns2" ] && until valid_ip "$dns2"; do
+            [ -n "$dns2" ] && until valid_ip "$dns2" || valid_ip6 "$dns2"; do
                 echo "Invalid DNS."
                 read -r dns2
             done
@@ -342,8 +367,8 @@ pick_dns() {
 }
 
 check_connectivity() {
-    if ! ping -c 3 8.8.8.8 >/dev/null 2>&1; then
-        abort "No internet connection detected. Please check your network."
+    if ! ping -c 3 8.8.8.8 >/dev/null 2>&1 && ! ping6 -c 3 2001:4860:4860::8888 >/dev/null 2>&1; then
+        abort "No internet connection detected (IPv4/IPv6). Please check your network."
     fi
 }
 
@@ -357,17 +382,17 @@ install_deps() {
     case "$os" in
         "ubuntu"|"debian")
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -y && apt-get install -y wireguard qrencode iptables || abort_apt
+            apt-get update -y && apt-get install -y wireguard qrencode iptables iproute2 || abort_apt
             ;;
         "centos")
-            [ "$os_ver" -eq 9 ] && yum install -y epel-release wireguard-tools qrencode iptables || abort_yum
-            [ "$os_ver" -eq 8 ] && yum install -y epel-release elrepo-release kmod-wireguard wireguard-tools qrencode iptables || abort_yum
+            [ "$os_ver" -eq 9 ] && yum install -y epel-release wireguard-tools qrencode iptables iproute || abort_yum
+            [ "$os_ver" -eq 8 ] && yum install -y epel-release elrepo-release kmod-wireguard wireguard-tools qrencode iptables iproute || abort_yum
             ;;
         "fedora")
-            dnf install -y wireguard-tools qrencode iptables || abort "dnf failed."
+            dnf install -y wireguard-tools qrencode iptables iproute || abort "dnf failed."
             ;;
         "openSUSE")
-            zypper install -y wireguard-tools qrencode iptables || abort_zypper
+            zypper install -y wireguard-tools qrencode iptables iproute2 || abort_zypper
             ;;
     esac
     mkdir -p /etc/wireguard
@@ -399,13 +424,19 @@ setup_firewall() {
         firewall-cmd --zone=trusted --add-source="10.7.0.0/24" --permanent
         firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j MASQUERADE --permanent
         [ -n "$IP6" ] && firewall-cmd --zone=trusted --add-source="fddd:2c4:2c4:2c4::/64" --permanent
+        [ -n "$IP6" ] && firewall-cmd --direct --add-rule ipv6 nat POSTROUTING 0 -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j MASQUERADE --permanent
         firewall-cmd --reload || abort "Failed to reload firewalld"
     else
         iptables -A INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null || abort "Failed to set iptables INPUT rule"
         iptables -A FORWARD -s 10.7.0.0/24 -j ACCEPT 2>/dev/null
         iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
         iptables -t nat -A POSTROUTING -s 10.7.0.0/24 -o "$net_if" -j MASQUERADE 2>/dev/null || abort "Failed to set NAT masquerading"
-        [ -n "$IP6" ] && ip6tables -t nat -A POSTROUTING -s "fddd:2c4:2c4:2c4::/64" -o "$net_if" -j MASQUERADE 2>/dev/null
+        if [ -n "$IP6" ]; then
+            ip6tables -A INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null || abort "Failed to set ip6tables INPUT rule"
+            ip6tables -A FORWARD -s fddd:2c4:2c4:2c4::/64 -j ACCEPT 2>/dev/null
+            ip6tables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+            ip6tables -t nat -A POSTROUTING -s fddd:2c4:2c4:2c4::/64 -o "$net_if" -j MASQUERADE 2>/dev/null || abort "Failed to set IPv6 NAT masquerading"
+        fi
     fi
     
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || abort "Failed to enable IP forwarding"
@@ -451,6 +482,10 @@ EOF
     local endpoint_port=$(grep '^ListenPort' "$WG_CONFIG" | cut -d ' ' -f 3)
     [ -z "$endpoint_ip" ] && endpoint_ip="$IP"
     [ -z "$endpoint_port" ] && endpoint_port="$PORT"
+
+    local allowed_ips="0.0.0.0/0"
+    [ -n "$IP6" ] && allowed_ips="0.0.0.0/0, ::/0"
+
     cat > "$out_dir$peer_name.conf" << EOF
 [Interface]
 Address = 10.7.0.$octet/24$( [ -n "$IP6" ] && echo ", fddd:2c4:2c4:2c4::$octet/64" )
@@ -460,7 +495,7 @@ PrivateKey = $key
 [Peer]
 PublicKey = $server_pub
 PresharedKey = $psk
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = $allowed_ips
 Endpoint = $endpoint_ip:$endpoint_port
 PersistentKeepalive = 25
 EOF
@@ -532,12 +567,13 @@ uninstall_wg() {
     rm -rf /etc/wireguard /etc/sysctl.d/99-wg.conf
     iptables -D INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null
     iptables -t nat -D POSTROUTING -s "10.7.0.0/24" -j MASQUERADE 2>/dev/null
+    [ -n "$IP6" ] && ip6tables -D INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null
     [ -n "$IP6" ] && ip6tables -t nat -D POSTROUTING -s "fddd:2c4:2c4:2c4::/64" -j MASQUERADE 2>/dev/null
     case "$os" in
-        "ubuntu"|"debian") apt-get remove --purge -y wireguard qrencode iptables 2>/dev/null ;;
-        "centos") yum remove -y wireguard-tools qrencode iptables 2>/dev/null ;;
-        "fedora") dnf remove -y wireguard-tools qrencode iptables 2>/dev/null ;;
-        "openSUSE") zypper remove -y wireguard-tools qrencode iptables 2>/dev/null ;;
+        "ubuntu"|"debian") apt-get remove --purge -y wireguard qrencode iptables iproute2 2>/dev/null ;;
+        "centos") yum remove -y wireguard-tools qrencode iptables iproute 2>/dev/null ;;
+        "fedora") dnf remove -y wireguard-tools qrencode iptables iproute 2>/dev/null ;;
+        "openSUSE") zypper remove -y wireguard-tools qrencode iptables iproute2 2>/dev/null ;;
     esac
     echo "WireGuard removed."
 }
