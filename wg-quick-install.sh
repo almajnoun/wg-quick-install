@@ -202,10 +202,17 @@ EOF
 
 choose_addr() {
     if [ "$QUICK" = 0 ]; then
-        echo -e "\nUse domain (e.g., vpn.example.com) instead of IP? [y/N]:"
-        read -r resp
-        case "$resp" in
-            [yY]*) 
+        echo -e "\nChoose server endpoint type:"
+        echo "  1) Domain (e.g., vpn.example.com)"
+        echo "  2) IPv4"
+        echo "  3) IPv6 (if available)"
+        read -rp "Type [1]: " type_choice
+        until [[ -z "$type_choice" || "$type_choice" =~ ^[1-3]$ ]]; do
+            echo "Invalid choice."
+            read -rp "Type [1]: " type_choice
+        done
+        case "${type_choice:-1}" in
+            1)
                 echo -e "\nEnter server domain:"
                 read -r addr
                 until is_fqdn "$addr"; do
@@ -215,12 +222,22 @@ choose_addr() {
                 IP="$addr"
                 dns_notice "$IP"
                 ;;
-            *) detect_ip ;;
+            2) detect_ip; IP="${PUBLIC_IP:-$IP}" ;;
+            3)
+                detect_ip
+                if [ -n "$IP6" ] || [ -n "$PUBLIC_IP6" ]; then
+                    IP="${PUBLIC_IP6:-$IP6}"
+                else
+                    echo "No IPv6 detected. Falling back to IPv4."
+                    IP="${PUBLIC_IP:-$IP}"
+                fi
+                ;;
         esac
     else
-        [ -n "$SERVER_ADDR" ] && IP="$SERVER_ADDR" || detect_ip
+        [ -n "$SERVER_ADDR" ] && IP="$SERVER_ADDR" || { detect_ip; IP="${PUBLIC_IP:-$IP}"; }
     fi
     [ -z "$IP" ] && abort "Failed to set server address."
+    echo "Endpoint set to: $IP"
 }
 
 detect_ip() {
@@ -232,13 +249,25 @@ detect_ip() {
         if ! valid_ip "$IP"; then
             IP=$(timeout 5 curl -s http://ipv4.icanhazip.com || timeout 5 curl -s http://ip1.dynupdate.no-ip.com || timeout 5 curl -s https://api.ipify.org)
             if ! valid_ip "$IP"; then
-                [ "$QUICK" = 0 ] && pick_ip || abort "Cannot detect server IP. Check network connectivity."
+                [ "$QUICK" = 0 ] && pick_ip || abort "Cannot detect server IPv4. Check network connectivity."
             fi
         fi
     fi
-    is_private_ip "$IP" && PUBLIC_IP=$(timeout 5 curl -s http://ipv4.icanhazip.com || abort "Failed to detect public IP. Check internet connection.")
-    echo "Server IP: $IP"
-    [ -n "$PUBLIC_IP" ] && echo "Public IP (NAT): $PUBLIC_IP"
+    is_private_ip "$IP" && PUBLIC_IP=$(timeout 5 curl -s http://ipv4.icanhazip.com || abort "Failed to detect public IPv4. Check internet connection.")
+
+    IP6=""
+    if ip -6 addr | grep -q 'inet6 [23]'; then
+        IP6=$(ip -6 addr | grep 'inet6 [23]' | grep -v 'fe80::' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | head -1)
+    fi
+    if [ -z "$IP6" ] && [ "$QUICK" = 0 ]; then
+        PUBLIC_IP6=$(timeout 5 curl -s http://ipv6.icanhazip.com || timeout 5 curl -s https://api64.ipify.org)
+        [ -n "$PUBLIC_IP6" ] && valid_ip6 "$PUBLIC_IP6" && IP6="$PUBLIC_IP6"
+    fi
+
+    echo "Server IPv4: $IP"
+    [ -n "$PUBLIC_IP" ] && echo "Public IPv4 (NAT): $PUBLIC_IP"
+    [ -n "$IP6" ] && echo "Server IPv6: $IP6"
+    [ -n "$PUBLIC_IP6" ] && echo "Public IPv6 (NAT): $PUBLIC_IP6"
 }
 
 pick_ip() {
@@ -406,7 +435,7 @@ gen_server_config() {
     echo "$priv" > /etc/wireguard/server.key
     chmod 600 /etc/wireguard/server.key /etc/wireguard/server.pub
     cat > "$WG_CONFIG" << EOF
-# ENDPOINT $([ -n "$PUBLIC_IP" ] && echo "$PUBLIC_IP" || echo "$IP")
+# ENDPOINT $([ -n "$PUBLIC_IP" ] && echo "$PUBLIC_IP" || echo "$IP")$( [ -n "$IP6" ] && echo " or [$IP6]" )
 [Interface]
 Address = 10.7.0.1/24$( [ -n "$IP6" ] && echo ", fddd:2c4:2c4:2c4::1/64" )
 PrivateKey = $priv
@@ -486,6 +515,11 @@ EOF
     local allowed_ips="0.0.0.0/0"
     [ -n "$IP6" ] && allowed_ips="0.0.0.0/0, ::/0"
 
+    local endpoint_display="$endpoint_ip:$endpoint_port"
+    if valid_ip6 "$endpoint_ip"; then
+        endpoint_display="[$endpoint_ip]:$endpoint_port"
+    fi
+
     cat > "$out_dir$peer_name.conf" << EOF
 [Interface]
 Address = 10.7.0.$octet/24$( [ -n "$IP6" ] && echo ", fddd:2c4:2c4:2c4::$octet/64" )
@@ -496,7 +530,7 @@ PrivateKey = $key
 PublicKey = $server_pub
 PresharedKey = $psk
 AllowedIPs = $allowed_ips
-Endpoint = $endpoint_ip:$endpoint_port
+Endpoint = $endpoint_display
 PersistentKeepalive = 25
 EOF
     chmod 600 "$out_dir$peer_name.conf"
@@ -618,6 +652,7 @@ setup_wg() {
     QR_PEER=0
     UNINSTALL=0
     PUBLIC_IP=""
+    PUBLIC_IP6=""
     SERVER_ADDR=""
     PORT=""
     FIRST_PEER=""
